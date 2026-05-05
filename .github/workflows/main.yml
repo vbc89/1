@@ -80,19 +80,34 @@ jobs:
           OS="${{ inputs.os_image }}"
           METHOD="${{ inputs.remote_method }}"
           TUNNEL="${{ inputs.tunnels }}"
+
+          # Validate remote method compatibility - FIXED syntax
           if [[ "$METHOD" != "all" ]]; then
+            VALID="false"
             case "$OS" in
               windows-latest)
-                [[ ! "$METHOD" =~ ^(rdp|rustdesk|teamviewer|anydesk|chrome-remote-desktop|parsec)$ ]] && { echo "Not available on Windows"; exit 1 }
+                case "$METHOD" in
+                  rdp|rustdesk|teamviewer|anydesk|chrome-remote-desktop|parsec) VALID="true" ;;
+                esac
                 ;;
               ubuntu-latest)
-                [[ ! "$METHOD" =~ ^(ssh|xrdp|vnc|rustdesk|teamviewer|anydesk|chrome-remote-desktop|parsec)$ ]] && { echo "Not available on Linux"; exit 1 }
+                case "$METHOD" in
+                  ssh|xrdp|vnc|rustdesk|teamviewer|anydesk|chrome-remote-desktop|parsec) VALID="true" ;;
+                esac
                 ;;
               macos-latest)
-                [[ ! "$METHOD" =~ ^(ssh|vnc|rustdesk|teamviewer|anydesk|chrome-remote-desktop|parsec)$ ]] && { echo "Not available on macOS"; exit 1 }
+                case "$METHOD" in
+                  ssh|vnc|rustdesk|teamviewer|anydesk|chrome-remote-desktop|parsec) VALID="true" ;;
+                esac
                 ;;
             esac
+            if [[ "$VALID" == "false" ]]; then
+              echo "Error: Method $METHOD is not available on $OS"
+              exit 1
+            fi
           fi
+
+          # Warn about missing tokens
           if [[ "$TUNNEL" == "all" || "$TUNNEL" == "tailscale" ]] && [[ -z "${{ inputs.ts_authkey }}" ]]; then
             echo "::warning::Tailscale selected but no authkey provided"
           fi
@@ -148,7 +163,7 @@ jobs:
             IP=$(tailscale ip -4 | head -1)
           fi
           echo "TAILSCALE_IP=$IP" >> $GITHUB_ENV
-          echo "✅ Tailscale IP: $IP"
+          echo "Tailscale IP: $IP"
 
       # ============================================================
       # PRIORITY TUNNEL 2 - Ngrok
@@ -188,7 +203,7 @@ jobs:
             fi
           fi
           if [[ -z "$NGROK" ]] || [[ ! -x "$NGROK" ]]; then
-            echo "❌ Ngrok installation failed"
+            echo "Ngrok installation failed"
             exit 1
           fi
           if [[ -n "${{ inputs.ngrok_token }}" ]]; then
@@ -206,14 +221,14 @@ jobs:
           if [[ -n "$URL" ]]; then
             echo "NGROK_URL=$URL" >> $GITHUB_ENV
             echo "NGROK_PORT=$(echo $URL | cut -d: -f3)" >> $GITHUB_ENV
-            echo "✅ Ngrok: $URL"
+            echo "Ngrok: $URL"
           else
-            echo "⚠️ Ngrok started but URL not available yet"
+            echo "Ngrok started but URL not available yet"
             echo "NGROK_URL=pending" >> $GITHUB_ENV
           fi
 
       # ============================================================
-      # PRIORITY REMOTE 1 - RustDesk (FIXED)
+      # PRIORITY REMOTE 1 - RustDesk
       # ============================================================
       - name: REMOTE 1 - RustDesk
         if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'rustdesk' }}
@@ -255,8 +270,8 @@ jobs:
           fi
           echo "RUSTDESK_ID=$RDID" >> $GITHUB_ENV
           echo "RUSTDESK_PASS=rustdesk123" >> $GITHUB_ENV
-          echo "✅ RustDesk ID: $RDID"
-          echo "✅ RustDesk Pass: rustdesk123"
+          echo "RustDesk ID: $RDID"
+          echo "RustDesk Pass: rustdesk123"
 
       # ============================================================
       # REMOTE 2 - Chrome Remote Desktop
@@ -268,7 +283,7 @@ jobs:
         run: |
           echo "=== Chrome Remote Desktop ==="
           if [[ -z "${{ inputs.crd_code }}" ]]; then
-            echo "⚠️ No CRD code provided, skipping"
+            echo "No CRD code provided, skipping"
             exit 0
           fi
           if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
@@ -283,7 +298,7 @@ jobs:
             sudo dpkg -i chrome-remote-desktop_current_amd64.deb || sudo apt-get install -f -y
             DISPLAY= /opt/google/chrome-remote-desktop/start-host               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$HOSTNAME"               --pin="${{ inputs.crd_pin }}"
           fi
-          echo "✅ CRD launched with PIN ${{ inputs.crd_pin }}"
+          echo "CRD launched with PIN ${{ inputs.crd_pin }}"
 
       # ============================================================
       # REMOTE 3 - Windows RDP
@@ -304,10 +319,10 @@ jobs:
           }
           Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Write-Host "✅ RDP: user=$u / pass=$p"
+          Write-Host "RDP: user=$u / pass=$p"
 
       # ============================================================
-      # REMOTE 4 - Linux XRDP (BULLETPROOF - FULL DESKTOP)
+      # REMOTE 4 - Linux XRDP (FULL DESKTOP)
       # ============================================================
       - name: REMOTE 4 - Linux XRDP
         if: ${{ inputs.os_image == 'ubuntu-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'xrdp') }}
@@ -316,71 +331,50 @@ jobs:
           echo "=== Installing Full Linux Desktop Environment ==="
           export DEBIAN_FRONTEND=noninteractive
 
-          # Update and install desktop + XRDP + SSH
           sudo apt-get update -y
           sudo apt-get install -y xfce4 xfce4-goodies xrdp xorgxrdp openssh-server
 
-          # CRITICAL FIX: Configure XRDP startup script properly [^3^]
+          # Configure XRDP startup script properly
           sudo tee /etc/xrdp/startwm.sh > /dev/null << 'EOF'
           #!/bin/sh
-          # XRDP session startup script - FIXED for GitHub Actions
-
-          # Load essential paths
           if [ -r /etc/profile ]; then . /etc/profile; fi
-
-          # UNSET conflicting environment variables [^3^]
           unset DBUS_SESSION_BUS_ADDRESS
           unset XDG_RUNTIME_DIR
-
-          # Start XFCE desktop
           startxfce4
           EOF
-
           sudo chmod +x /etc/xrdp/startwm.sh
 
-          # Configure XRDP settings - FIX color depth to 32 (not 128) [^3^]
+          # Configure XRDP settings
           sudo sed -i 's/^port=.*/port=3389/' /etc/xrdp/xrdp.ini 2>/dev/null || true
           sudo sed -i 's/^max_bpp=.*/max_bpp=32/' /etc/xrdp/xrdp.ini 2>/dev/null || true
           sudo sed -i 's/^xserverbpp=.*/xserverbpp=32/' /etc/xrdp/xrdp.ini 2>/dev/null || true
 
-          # Configure sesman
           sudo sed -i 's/^KillDisconnected=.*/KillDisconnected=true/' /etc/xrdp/sesman.ini 2>/dev/null || true
           sudo sed -i 's/^DisconnectedTimeLimit=.*/DisconnectedTimeLimit=0/' /etc/xrdp/sesman.ini 2>/dev/null || true
 
-          # Add user to ssl-cert group for XRDP
           sudo usermod -aG ssl-cert $USER
-
-          # CRITICAL: Set password using multiple methods to ensure it works
           echo "runner:$PASS_NIX" | sudo chpasswd
           sudo usermod -p $(openssl passwd -1 "$PASS_NIX") runner 2>/dev/null || true
-
-          # Ensure runner user exists with proper shell
           sudo usermod -s /bin/bash runner 2>/dev/null || true
 
-          # Create .xsession for runner user
           sudo bash -c 'echo "xfce4-session" > /home/runner/.xsession'
           sudo chown runner:runner /home/runner/.xsession 2>/dev/null || true
           sudo chmod 644 /home/runner/.xsession 2>/dev/null || true
 
-          # Also create for current user
           echo "xfce4-session" > ~/.xsession
           chmod 644 ~/.xsession
 
-          # Enable and start XRDP
           sudo systemctl enable xrdp || true
           sudo systemctl restart xrdp || sudo service xrdp restart || true
           sleep 3
           sudo systemctl status xrdp --no-pager || true
 
-          # Open firewall
           sudo ufw allow 3389/tcp 2>/dev/null || true
           sudo iptables -I INPUT -p tcp --dport 3389 -j ACCEPT 2>/dev/null || true
+          sudo ss -tlnp | grep 3389 || sudo netstat -tlnp | grep 3389 || echo "WARNING: XRDP not listening"
 
-          # Verify XRDP is listening
-          sudo ss -tlnp | grep 3389 || sudo netstat -tlnp | grep 3389 || echo "WARNING: XRDP not listening on 3389"
-
-          echo "✅ XRDP: user=runner / pass=$PASS_NIX"
-          echo "✅ XRDP Desktop ready on port 3389"
+          echo "XRDP: user=runner / pass=$PASS_NIX"
+          echo "XRDP Desktop ready on port 3389"
 
       # ============================================================
       # REMOTE 5 - macOS VNC
@@ -392,10 +386,10 @@ jobs:
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart             -activate -configure -access -on -restart -agent -privs -all
           sudo systemsetup -setremotelogin on
           echo "runner:$PASS_NIX" | sudo chpasswd
-          echo "✅ VNC + SSH: user=runner / pass=$PASS_NIX"
+          echo "VNC + SSH: user=runner / pass=$PASS_NIX"
 
       # ============================================================
-      # REMOTE 6 - SSH (BULLETPROOF - GUARANTEED PASSWORD AUTH)
+      # REMOTE 6 - SSH (GUARANTEED PASSWORD AUTH)
       # ============================================================
       - name: REMOTE 6 - SSH
         if: ${{ inputs.os_image != 'windows-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'ssh') }}
@@ -406,15 +400,12 @@ jobs:
           if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
             sudo systemsetup -setremotelogin on
           else
-            # Ubuntu/Linux
             sudo apt-get install -y openssh-server
             sudo systemctl enable ssh || true
             sudo systemctl start ssh || sudo service ssh start || true
 
-            # CRITICAL FIX: Backup original config and create new one
             sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
 
-            # Force password authentication
             sudo tee /etc/ssh/sshd_config.d/99-github-actions.conf > /dev/null << 'EOF'
             PasswordAuthentication yes
             PermitRootLogin no
@@ -423,36 +414,25 @@ jobs:
             AuthenticationMethods password
             EOF
 
-            # Remove any deny rules
             sudo sed -i '/^DenyUsers/d' /etc/ssh/sshd_config
             sudo sed -i '/^DenyGroups/d' /etc/ssh/sshd_config
-
-            # Ensure PAM is properly configured
             sudo sed -i 's/^@include common-auth/#@include common-auth/' /etc/pam.d/sshd 2>/dev/null || true
 
-            # Restart SSH to apply changes
             sudo systemctl restart ssh || sudo service ssh restart || true
             sleep 2
             sudo systemctl status ssh --no-pager || true
           fi
 
-          # Set password using multiple methods
           echo "runner:$PASS_NIX" | sudo chpasswd
           sudo usermod -p $(openssl passwd -1 "$PASS_NIX") runner 2>/dev/null || true
-
-          # Verify password was set
-          echo "Verifying password for runner..."
           sudo passwd -S runner || true
 
-          # Open firewall
           sudo ufw allow 22/tcp 2>/dev/null || true
           sudo iptables -I INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
+          sudo ss -tlnp | grep :22 || sudo netstat -tlnp | grep :22 || echo "WARNING: SSH not listening"
 
-          # Verify SSH is listening
-          sudo ss -tlnp | grep :22 || sudo netstat -tlnp | grep :22 || echo "WARNING: SSH not listening on port 22"
-
-          echo "✅ SSH: user=runner / pass=$PASS_NIX"
-          echo "✅ SSH ready on port 22"
+          echo "SSH: user=runner / pass=$PASS_NIX"
+          echo "SSH ready on port 22"
 
       # ============================================================
       # TUNNEL 3 - Cloudflare Tunnel
@@ -486,10 +466,10 @@ jobs:
             URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' cf.log | head -1)
             if [[ -n "$URL" ]]; then
               echo "CF_URL=$URL" >> $GITHUB_ENV
-              echo "✅ Cloudflare: $URL"
+              echo "Cloudflare: $URL"
             else
               echo "CF_URL=pending" >> $GITHUB_ENV
-              echo "⚠️ Cloudflare URL pending..."
+              echo "Cloudflare URL pending..."
             fi
           fi
 
@@ -513,10 +493,10 @@ jobs:
           URL=$(grep -o 'https://[a-z0-9-]*\.lhr\.life' localhost.log | head -1)
           if [[ -n "$URL" ]]; then
             echo "LOCALHOST_URL=$URL" >> $GITHUB_ENV
-            echo "✅ Localhost.run: $URL"
+            echo "Localhost.run: $URL"
           else
             echo "LOCALHOST_URL=pending" >> $GITHUB_ENV
-            echo "⚠️ Localhost.run URL pending..."
+            echo "Localhost.run URL pending..."
           fi
 
       # ============================================================
@@ -558,7 +538,7 @@ jobs:
           esac
           nohup $BORE local $BORE_PORT --to bore.pub > bore.log 2>&1 &
           sleep 10
-          echo "✅ Bore tunnel started on port $BORE_PORT"
+          echo "Bore tunnel started on port $BORE_PORT"
 
       # ============================================================
       # PRINT ALL CONNECTION METHODS
@@ -566,34 +546,31 @@ jobs:
       - name: Print All Connection Methods
         run: |
           echo ""
-          echo "╔══════════════════════════════════════════════════════════════╗"
-          echo "║           ALL CONNECTIVITY OPTIONS                           ║"
-          echo "║           $(date '+%Y-%m-%d %H:%M:%S')                              ║"
-          echo "╠══════════════════════════════════════════════════════════════╣"
-          echo "║  OS:      ${{ inputs.os_image }}                              "
-          echo "║  Runtime: ${{ inputs.runtime_minutes }} minutes (max 6 hours) "
-          echo "╠══════════════════════════════════════════════════════════════╣"
-          echo "║           PRIORITY REMOTES                                   ║"
-          echo "╠══════════════════════════════════════════════════════════════╣"
-          echo "║  RustDesk:                                                    "
-          echo "║    ID:       ${{ env.RUSTDESK_ID }}                           "
-          echo "║    Password: rustdesk123                                      "
-          echo "║  Tailscale:  ${{ env.TAILSCALE_IP }} (persistent VPN)         "
-          echo "╠══════════════════════════════════════════════════════════════╣"
-          echo "║           TUNNELS / NETWORK ACCESS                           ║"
-          echo "╠══════════════════════════════════════════════════════════════╣"
-          echo "║  Cloudflare:  ${{ env.CF_URL }}                               "
-          echo "║  Ngrok:       ${{ env.NGROK_URL }}                            "
-          echo "║  LocalTunnel: ${{ env.LOCALHOST_URL }}                        "
-          echo "╠══════════════════════════════════════════════════════════════╣"
-          echo "║           OTHER REMOTE DESKTOP METHODS                       ║"
-          echo "╠══════════════════════════════════════════════════════════════╣"
-          echo "║  XRDP:  ${{ env.TAILSCALE_IP }}:3389  User: runner  Pass: runner@12345"
-          echo "║  SSH:   ssh runner@${{ env.TAILSCALE_IP }}  Pass: runner@12345"
-          echo "╠══════════════════════════════════════════════════════════════╣"
-          echo "║  RDP:   mstsc /v:${{ env.TAILSCALE_IP }}                      "
-          echo "║  SSH:   ssh runner@${{ env.TAILSCALE_IP }}                    "
-          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo "=========================================="
+          echo "  ALL CONNECTIVITY OPTIONS"
+          echo "  $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "=========================================="
+          echo "  OS:      ${{ inputs.os_image }}"
+          echo "  Runtime: ${{ inputs.runtime_minutes }} minutes"
+          echo "=========================================="
+          echo "  PRIORITY REMOTES"
+          echo "=========================================="
+          echo "  RustDesk ID: ${{ env.RUSTDESK_ID }}"
+          echo "  RustDesk Pass: rustdesk123"
+          echo "  Tailscale: ${{ env.TAILSCALE_IP }}"
+          echo "=========================================="
+          echo "  TUNNELS"
+          echo "=========================================="
+          echo "  Cloudflare: ${{ env.CF_URL }}"
+          echo "  Ngrok: ${{ env.NGROK_URL }}"
+          echo "  Localhost: ${{ env.LOCALHOST_URL }}"
+          echo "=========================================="
+          echo "  OTHER METHODS"
+          echo "=========================================="
+          echo "  XRDP: ${{ env.TAILSCALE_IP }}:3389"
+          echo "  SSH:  ssh runner@${{ env.TAILSCALE_IP }}"
+          echo "  User: runner / Pass: runner@12345"
+          echo "=========================================="
           echo ""
 
       # ============================================================
@@ -605,23 +582,18 @@ jobs:
           [[ -z "$RUNTIME" ]] && RUNTIME=360
           for ((i=RUNTIME; i>0; i--)); do
             echo "[$(date '+%H:%M:%S')] ${i}m remaining"
-            echo "  RustDesk:  ${{ env.RUSTDESK_ID }} / Pass: rustdesk123"
+            echo "  RustDesk: ${{ env.RUSTDESK_ID }} / Pass: rustdesk123"
             echo "  Tailscale: ${{ env.TAILSCALE_IP }}"
-            echo "  Ngrok:     ${{ env.NGROK_URL }}"
+            echo "  Ngrok: ${{ env.NGROK_URL }}"
             echo "  Cloudflare: ${{ env.CF_URL }}"
             echo "  Localhost: ${{ env.LOCALHOST_URL }}"
-
-            # Test services are running
             if [[ "${{ inputs.os_image }}" == "ubuntu-latest" ]]; then
               sudo systemctl is-active xrdp >/dev/null 2>&1 && echo "  XRDP: Running" || echo "  XRDP: Stopped"
-              sudo systemctl is-active ssh >/dev/null 2>&1 && echo "  SSH:  Running" || echo "  SSH:  Stopped"
+              sudo systemctl is-active ssh >/dev/null 2>&1 && echo "  SSH: Running" || echo "  SSH: Stopped"
             fi
-
-            # Tailscale ping test
             if [[ -n "${{ env.TAILSCALE_IP }}" ]]; then
               tailscale ping -c 1 ${{ env.TAILSCALE_IP }} >/dev/null 2>&1 && echo "  Tailscale ping OK" || echo "  Tailscale ping FAIL"
             fi
-
             sleep 60
           done
-          echo "Runtime completed. Shutting down..."
+          echo "Runtime completed."
