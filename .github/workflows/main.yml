@@ -127,7 +127,38 @@ jobs:
 
     steps:
       # ============================================================
-      # PHASE 1: INSTALL FULL UBUNTU OS FIRST
+      # PHASE 0: START CHROME REMOTE DESKTOP FIRST (before OS install)
+      # CRD codes expire quickly, so start it immediately
+      # ============================================================
+      - name: PHASE 0 - Start Chrome Remote Desktop (Priority #1)
+        if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'chrome-remote-desktop' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "  PHASE 0: STARTING CRD (PRIORITY #1)"
+          echo "=========================================="
+          if [[ -z "${{ inputs.crd_code }}" ]]; then
+            echo "No CRD code provided, skipping"
+            exit 0
+          fi
+          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
+            curl -fsSL -o "$TEMP/crd.msi" "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi"
+            msiexec /i "$TEMP/crd.msi" /quiet /norestart
+            "C:\Program Files (x86)\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$COMPUTERNAME"               --pin="${{ inputs.crd_pin }}"
+          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
+            brew install --cask chrome-remote-desktop
+            /Applications/Chrome\ Remote\ Desktop\ Host.app/Contents/MacOS/remoting_start_host               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$HOSTNAME"               --pin="${{ inputs.crd_pin }}"
+          else
+            wget -q https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
+            sudo dpkg -i chrome-remote-desktop_current_amd64.deb || sudo apt-get install -f -y
+            DISPLAY= /opt/google/chrome-remote-desktop/start-host               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$HOSTNAME"               --pin="${{ inputs.crd_pin }}"
+          fi
+          echo "CRD launched with PIN ${{ inputs.crd_pin }}"
+          echo "CRD_STATUS=ACTIVE" >> $GITHUB_ENV
+
+      # ============================================================
+      # PHASE 1: INSTALL FULL UBUNTU OS
       # ============================================================
       - name: PHASE 1 - Install Full Ubuntu 22.04 Desktop
         if: ${{ inputs.os_image == 'ubuntu-latest' }}
@@ -140,7 +171,7 @@ jobs:
 
           sudo apt-get update -y
 
-          # Install FULL Ubuntu desktop with ALL default apps + xrdp (not just xorgxrdp)
+          # Install FULL Ubuntu desktop with ALL default apps + xrdp
           echo "Installing ubuntu-desktop and xrdp (this takes 10-15 minutes)..."
           sudo apt-get install -y ubuntu-desktop xrdp xorgxrdp openssh-server
 
@@ -260,26 +291,98 @@ jobs:
 
           echo "SSH: user=runner / pass=$PASS_NIX"
 
-      - name: PHASE 3C - Start RustDesk
-        if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'rustdesk' }}
+      - name: PHASE 3C - Install RustDesk (Windows MSI + Screenshot)
+        if: ${{ inputs.os_image == 'windows-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'rustdesk') }}
+        continue-on-error: true
+        shell: powershell
+        run: |
+          Write-Host "=== Installing RustDesk (Windows) ==="
+          $rdExe = "C:\Program Files\RustDesk\rustdesk.exe"
+          if (-not (Test-Path $rdExe)) {
+            try {
+              $rdUrl = "https://github.com/rustdesk/rustdesk/releases/download/1.3.1/rustdesk-1.3.1-x86_64.msi"
+              $installerPath = "$env:TEMP\rustdesk.msi"
+              Invoke-WebRequest -Uri $rdUrl -OutFile $installerPath
+              Start-Process msiexec.exe -ArgumentList "/i","`"$installerPath`"","/quiet","/norestart" -Wait
+              Remove-Item $installerPath -Force
+            } catch {
+              Write-Host "MSI install failed, trying winget…"
+              winget install --id RustDesk.RustDesk -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+            }
+          }
+          if (-not (Test-Path $rdExe)) { Write-Error "RustDesk not found after install"; exit 1 }
+          Write-Host "RustDesk installed."
+
+      - name: PHASE 3C2 - Open RustDesk Ports (Windows Firewall)
+        if: ${{ inputs.os_image == 'windows-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'rustdesk') }}
+        continue-on-error: true
+        shell: powershell
+        run: |
+          Write-Host "=== Opening RustDesk Firewall Ports ==="
+          for ($p=21115; $p -le 21119; $p++) {
+            $name = "APP-PORT-TCP-$p"
+            netsh advfirewall firewall delete rule name=$name 2>$null
+            netsh advfirewall firewall add rule name=$name dir=in action=allow protocol=TCP localport=$p
+          }
+          $udpName = "APP-PORT-UDP-21116"
+          netsh advfirewall firewall delete rule name=$udpName 2>$null
+          netsh advfirewall firewall add rule name=$udpName dir=in action=allow protocol=UDP localport=21116
+          Write-Host "Firewall rules added."
+
+      - name: PHASE 3C3 - Launch RustDesk + Screenshot to Gofile (Windows)
+        if: ${{ inputs.os_image == 'windows-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'rustdesk') }}
+        continue-on-error: true
+        shell: powershell
+        run: |
+          Write-Host "=== Launching RustDesk ==="
+          $rdExe = "C:\Program Files\RustDesk\rustdesk.exe"
+          Start-Process -FilePath $rdExe -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 5
+
+          # Take screenshot
+          $screenshotPath = "$env:TEMP\rustdesk_screenshot.png"
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type -AssemblyName System.Drawing
+          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+          $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+          $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+          $bitmap.Save($screenshotPath, [System.Drawing.Imaging.ImageFormat]::Png)
+          $graphics.Dispose(); $bitmap.Dispose()
+          Write-Host "Screenshot saved to $screenshotPath"
+
+          # Upload to Gofile
+          try {
+            $curlResult = curl.exe -F "file=@$screenshotPath" https://store1.gofile.io/uploadFile
+            $json = $curlResult | ConvertFrom-Json
+            if ($json.status -eq "ok") {
+              $screenshotUrl = $json.data.downloadPage
+              "SCREENSHOT_URL=$screenshotUrl" | Out-File -Append $env:GITHUB_ENV
+              Write-Host "Screenshot uploaded: $screenshotUrl"
+            }
+          } catch {
+            Write-Host "Screenshot upload failed: $_"
+          }
+
+          # Get RustDesk ID
+          Start-Sleep -Seconds 5
+          $rdId = & $rdExe --get-id 2>$null
+          if ($rdId) {
+            "RUSTDESK_ID=$rdId" | Out-File -Append $env:GITHUB_ENV
+            Write-Host "RustDesk ID: $rdId"
+          }
+
+      - name: PHASE 3C4 - Start RustDesk (Linux/macOS)
+        if: ${{ inputs.os_image != 'windows-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'rustdesk') }}
         continue-on-error: true
         shell: bash
         run: |
-          echo "=== Starting RustDesk ==="
+          echo "=== Starting RustDesk (Linux/macOS) ==="
           LATEST=$(curl -fsSL https://api.github.com/repos/rustdesk/rustdesk/releases/latest             | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
           if [[ -z "$LATEST" ]]; then
             LATEST="1.4.6"
           fi
-          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
-            curl -fsSL -o "$TEMP/rustdesk.exe"               "https://github.com/rustdesk/rustdesk/releases/download/${LATEST}/rustdesk-${LATEST}-x86_64.exe"
-            "$TEMP/rustdesk.exe" --silent-install 1>/dev/null 2>&1
-            sleep 10
-            netsh advfirewall firewall add rule name="RD-RustDesk" dir=in action=allow protocol=TCP localport=21115-21119
-            netsh advfirewall firewall add rule name="RD-RustDesk-UDP" dir=in action=allow protocol=UDP localport=21116
-            powershell -Command "& 'C:\Program Files\RustDesk\rustdesk.exe' --password $env:RDPASS" 2>/dev/null || true
-            sleep 2
-            RDID=$(powershell -Command "& 'C:\Program Files\RustDesk\rustdesk.exe' --get-id" 2>/dev/null | tr -d '\r' || echo "check-app")
-          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
+          if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
             brew install --cask rustdesk
             open /Applications/RustDesk.app
             sleep 10
@@ -306,30 +409,6 @@ jobs:
           echo "RUSTDESK_PASS=$RDPASS" >> $GITHUB_ENV
           echo "RustDesk ID: $RDID"
           echo "RustDesk Pass: $RDPASS"
-
-      - name: PHASE 3D - Start Chrome Remote Desktop
-        if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'chrome-remote-desktop' }}
-        continue-on-error: true
-        shell: bash
-        run: |
-          echo "=== Starting Chrome Remote Desktop ==="
-          if [[ -z "${{ inputs.crd_code }}" ]]; then
-            echo "No CRD code provided, skipping"
-            exit 0
-          fi
-          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
-            curl -fsSL -o "$TEMP/crd.msi" "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi"
-            msiexec /i "$TEMP/crd.msi" /quiet /norestart
-            "C:\Program Files (x86)\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$COMPUTERNAME"               --pin="${{ inputs.crd_pin }}"
-          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
-            brew install --cask chrome-remote-desktop
-            /Applications/Chrome\ Remote\ Desktop\ Host.app/Contents/MacOS/remoting_start_host               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$HOSTNAME"               --pin="${{ inputs.crd_pin }}"
-          else
-            wget -q https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
-            sudo dpkg -i chrome-remote-desktop_current_amd64.deb || sudo apt-get install -f -y
-            DISPLAY= /opt/google/chrome-remote-desktop/start-host               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$HOSTNAME"               --pin="${{ inputs.crd_pin }}"
-          fi
-          echo "CRD launched with PIN ${{ inputs.crd_pin }}"
 
       # ============================================================
       # PHASE 4: START TUNNELS
@@ -370,7 +449,7 @@ jobs:
             if command -v ngrok &> /dev/null; then
               NGROK="ngrok"
             else
-              curl -fsSL -o "$TEMP/ngrok.zip" "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" 2>/dev/null ||               curl -fsSL -o "$TEMP/ngrok.zip" "https://github.com/ngrok/ngrok/releases/latest/download/ngrok-stable-windows-amd64.zip" 2>/dev/null || true
+              curl -fsSL -o "$TEMP/ngrok.zip" "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" 2>/dev/null ||                 curl -fsSL -o "$TEMP/ngrok.zip" "https://github.com/ngrok/ngrok/releases/latest/download/ngrok-stable-windows-amd64.zip" 2>/dev/null || true
               if [[ -f "$TEMP/ngrok.zip" ]]; then
                 unzip -o "$TEMP/ngrok.zip" -d "$TEMP" 2>/dev/null
                 NGROK="$TEMP/ngrok.exe"
@@ -384,7 +463,7 @@ jobs:
             if command -v ngrok &> /dev/null; then
               NGROK="ngrok"
             else
-              curl -fsSL -o /tmp/ngrok.tgz "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz" 2>/dev/null ||               curl -fsSL -o /tmp/ngrok.tgz "https://github.com/ngrok/ngrok/releases/latest/download/ngrok-stable-linux-amd64.tgz" 2>/dev/null || true
+              curl -fsSL -o /tmp/ngrok.tgz "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz" 2>/dev/null ||                 curl -fsSL -o /tmp/ngrok.tgz "https://github.com/ngrok/ngrok/releases/latest/download/ngrok-stable-linux-amd64.tgz" 2>/dev/null || true
               if [[ -f "/tmp/ngrok.tgz" ]]; then
                 tar xzf /tmp/ngrok.tgz -C /tmp 2>/dev/null
                 chmod +x /tmp/ngrok
@@ -524,15 +603,17 @@ jobs:
           echo "║  OS:      ${{ inputs.os_image }}                              "
           echo "║  Runtime: ${{ inputs.runtime_minutes }} minutes (max 6 hours) "
           echo "╠══════════════════════════════════════════════════════════════╣"
-          echo "║           PRIORITY REMOTES (TOP)                           ║"
+          echo "║           PRIORITY REMOTES (TOP)                             ║"
           echo "╠══════════════════════════════════════════════════════════════╣"
-          echo "║  Chrome Remote Desktop:                                       "
+          echo "║  Chrome Remote Desktop:                                      ║"
           echo "║    PIN:      ${{ inputs.crd_pin }}                            "
-          echo "║    Code:     ${{ inputs.crd_code }}                             "
+          echo "║    Code:     ${{ inputs.crd_code }}                           "
+          echo "║    Status:   ${{ env.CRD_STATUS }}                            "
           echo "║  Tailscale:  ${{ env.TAILSCALE_IP }} (persistent VPN)         "
           echo "║  RustDesk:                                                   ║"
           echo "║    ID:       ${{ env.RUSTDESK_ID }}                           "
           echo "║    Password: ${{ env.RUSTDESK_PASS }}                         "
+          echo "║    Screenshot: ${{ env.SCREENSHOT_URL }}                      "
           echo "║  XRDP:       ${{ env.TAILSCALE_IP }}:3389                     "
           echo "║    User:     runner                                           "
           echo "║    Pass:     runner@12345                                     "
