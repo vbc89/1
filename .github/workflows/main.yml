@@ -81,7 +81,6 @@ jobs:
           METHOD="${{ inputs.remote_method }}"
           TUNNEL="${{ inputs.tunnels }}"
 
-          # Validate remote method compatibility - FIXED syntax
           if [[ "$METHOD" != "all" ]]; then
             VALID="false"
             case "$OS" in
@@ -107,7 +106,6 @@ jobs:
             fi
           fi
 
-          # Warn about missing tokens
           if [[ "$TUNNEL" == "all" || "$TUNNEL" == "tailscale" ]] && [[ -z "${{ inputs.ts_authkey }}" ]]; then
             echo "::warning::Tailscale selected but no authkey provided"
           fi
@@ -127,20 +125,13 @@ jobs:
       PASS_NIX: runner@12345
 
     steps:
-      # ============================================================
-      # SETUP BASE SYSTEM
-      # ============================================================
       - name: Setup Base Linux Environment
         if: ${{ inputs.os_image == 'ubuntu-latest' }}
         run: |
           echo "=== Updating System ==="
           sudo apt-get update -y
-          sudo apt-get install -y curl wget net-tools iputils-ping software-properties-common apt-transport-https ca-certificates gnupg lsb-release
-          echo "Base packages installed"
+          sudo apt-get install -y curl wget net-tools iputils-ping
 
-      # ============================================================
-      # PRIORITY TUNNEL 1 - Tailscale
-      # ============================================================
       - name: TUNNEL 1 - Tailscale
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'tailscale' }}
         continue-on-error: true
@@ -165,9 +156,6 @@ jobs:
           echo "TAILSCALE_IP=$IP" >> $GITHUB_ENV
           echo "Tailscale IP: $IP"
 
-      # ============================================================
-      # PRIORITY TUNNEL 2 - Ngrok
-      # ============================================================
       - name: TUNNEL 2 - Ngrok
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'ngrok' }}
         continue-on-error: true
@@ -223,13 +211,9 @@ jobs:
             echo "NGROK_PORT=$(echo $URL | cut -d: -f3)" >> $GITHUB_ENV
             echo "Ngrok: $URL"
           else
-            echo "Ngrok started but URL not available yet"
             echo "NGROK_URL=pending" >> $GITHUB_ENV
           fi
 
-      # ============================================================
-      # PRIORITY REMOTE 1 - RustDesk
-      # ============================================================
       - name: REMOTE 1 - RustDesk
         if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'rustdesk' }}
         continue-on-error: true
@@ -237,7 +221,6 @@ jobs:
         run: |
           echo "=== Installing RustDesk ==="
           LATEST=$(curl -fsSL https://api.github.com/repos/rustdesk/rustdesk/releases/latest             | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
-          echo "Latest RustDesk version: $LATEST"
           if [[ -z "$LATEST" ]]; then
             LATEST="1.4.6"
           fi
@@ -273,9 +256,6 @@ jobs:
           echo "RustDesk ID: $RDID"
           echo "RustDesk Pass: rustdesk123"
 
-      # ============================================================
-      # REMOTE 2 - Chrome Remote Desktop
-      # ============================================================
       - name: REMOTE 2 - Chrome Remote Desktop
         if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'chrome-remote-desktop' }}
         continue-on-error: true
@@ -300,9 +280,6 @@ jobs:
           fi
           echo "CRD launched with PIN ${{ inputs.crd_pin }}"
 
-      # ============================================================
-      # REMOTE 3 - Windows RDP
-      # ============================================================
       - name: REMOTE 3 - Windows RDP
         if: ${{ inputs.os_image == 'windows-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'rdp') }}
         continue-on-error: true
@@ -321,36 +298,29 @@ jobs:
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Write-Host "RDP: user=$u / pass=$p"
 
-      # ============================================================
-      # REMOTE 4 - Linux XRDP (FULL DESKTOP)
-      # ============================================================
       - name: REMOTE 4 - Linux XRDP
         if: ${{ inputs.os_image == 'ubuntu-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'xrdp') }}
         continue-on-error: false
         run: |
-          echo "=== Installing Full Linux Desktop Environment ==="
+          echo "=== Installing Full Linux Desktop ==="
           export DEBIAN_FRONTEND=noninteractive
 
           sudo apt-get update -y
           sudo apt-get install -y xfce4 xfce4-goodies xrdp xorgxrdp openssh-server
 
-          # Configure XRDP startup script properly
-          sudo tee /etc/xrdp/startwm.sh > /dev/null << 'EOF'
-          #!/bin/sh
-          if [ -r /etc/profile ]; then . /etc/profile; fi
-          unset DBUS_SESSION_BUS_ADDRESS
-          unset XDG_RUNTIME_DIR
-          startxfce4
-          EOF
+          # Configure XRDP
+          sudo bash -c 'cat > /etc/xrdp/startwm.sh << "EOF"
+#!/bin/sh
+if [ -r /etc/profile ]; then . /etc/profile; fi
+unset DBUS_SESSION_BUS_ADDRESS
+unset XDG_RUNTIME_DIR
+startxfce4
+EOF'
           sudo chmod +x /etc/xrdp/startwm.sh
 
-          # Configure XRDP settings
           sudo sed -i 's/^port=.*/port=3389/' /etc/xrdp/xrdp.ini 2>/dev/null || true
           sudo sed -i 's/^max_bpp=.*/max_bpp=32/' /etc/xrdp/xrdp.ini 2>/dev/null || true
           sudo sed -i 's/^xserverbpp=.*/xserverbpp=32/' /etc/xrdp/xrdp.ini 2>/dev/null || true
-
-          sudo sed -i 's/^KillDisconnected=.*/KillDisconnected=true/' /etc/xrdp/sesman.ini 2>/dev/null || true
-          sudo sed -i 's/^DisconnectedTimeLimit=.*/DisconnectedTimeLimit=0/' /etc/xrdp/sesman.ini 2>/dev/null || true
 
           sudo usermod -aG ssl-cert $USER
           echo "runner:$PASS_NIX" | sudo chpasswd
@@ -374,11 +344,7 @@ jobs:
           sudo ss -tlnp | grep 3389 || sudo netstat -tlnp | grep 3389 || echo "WARNING: XRDP not listening"
 
           echo "XRDP: user=runner / pass=$PASS_NIX"
-          echo "XRDP Desktop ready on port 3389"
 
-      # ============================================================
-      # REMOTE 5 - macOS VNC
-      # ============================================================
       - name: REMOTE 5 - macOS VNC
         if: ${{ inputs.os_image == 'macos-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'vnc') }}
         continue-on-error: true
@@ -388,14 +354,11 @@ jobs:
           echo "runner:$PASS_NIX" | sudo chpasswd
           echo "VNC + SSH: user=runner / pass=$PASS_NIX"
 
-      # ============================================================
-      # REMOTE 6 - SSH (GUARANTEED PASSWORD AUTH)
-      # ============================================================
       - name: REMOTE 6 - SSH
         if: ${{ inputs.os_image != 'windows-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'ssh') }}
         continue-on-error: false
         run: |
-          echo "=== Configuring SSH with Password Authentication ==="
+          echo "=== Configuring SSH ==="
 
           if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
             sudo systemsetup -setremotelogin on
@@ -406,17 +369,14 @@ jobs:
 
             sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
 
-            sudo tee /etc/ssh/sshd_config.d/99-github-actions.conf > /dev/null << 'EOF'
-            PasswordAuthentication yes
-            PermitRootLogin no
-            ChallengeResponseAuthentication yes
-            UsePAM yes
-            AuthenticationMethods password
-            EOF
+            # Use echo instead of here-document to avoid EOF issues
+            sudo bash -c 'echo "PasswordAuthentication yes" > /etc/ssh/sshd_config.d/99-github-actions.conf'
+            sudo bash -c 'echo "PermitRootLogin no" >> /etc/ssh/sshd_config.d/99-github-actions.conf'
+            sudo bash -c 'echo "ChallengeResponseAuthentication yes" >> /etc/ssh/sshd_config.d/99-github-actions.conf'
+            sudo bash -c 'echo "UsePAM yes" >> /etc/ssh/sshd_config.d/99-github-actions.conf'
 
             sudo sed -i '/^DenyUsers/d' /etc/ssh/sshd_config
             sudo sed -i '/^DenyGroups/d' /etc/ssh/sshd_config
-            sudo sed -i 's/^@include common-auth/#@include common-auth/' /etc/pam.d/sshd 2>/dev/null || true
 
             sudo systemctl restart ssh || sudo service ssh restart || true
             sleep 2
@@ -432,11 +392,7 @@ jobs:
           sudo ss -tlnp | grep :22 || sudo netstat -tlnp | grep :22 || echo "WARNING: SSH not listening"
 
           echo "SSH: user=runner / pass=$PASS_NIX"
-          echo "SSH ready on port 22"
 
-      # ============================================================
-      # TUNNEL 3 - Cloudflare Tunnel
-      # ============================================================
       - name: TUNNEL 3 - Cloudflare Tunnel
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'cloudflare-tunnel' }}
         continue-on-error: true
@@ -469,13 +425,9 @@ jobs:
               echo "Cloudflare: $URL"
             else
               echo "CF_URL=pending" >> $GITHUB_ENV
-              echo "Cloudflare URL pending..."
             fi
           fi
 
-      # ============================================================
-      # TUNNEL 4 - Localhost.run
-      # ============================================================
       - name: TUNNEL 4 - Localhost.run
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'localhost-run' }}
         continue-on-error: true
@@ -496,12 +448,8 @@ jobs:
             echo "Localhost.run: $URL"
           else
             echo "LOCALHOST_URL=pending" >> $GITHUB_ENV
-            echo "Localhost.run URL pending..."
           fi
 
-      # ============================================================
-      # TUNNEL 5 - Bore Tunnel
-      # ============================================================
       - name: TUNNEL 5 - Bore Tunnel
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'bore-tunnel' }}
         continue-on-error: true
@@ -540,9 +488,6 @@ jobs:
           sleep 10
           echo "Bore tunnel started on port $BORE_PORT"
 
-      # ============================================================
-      # PRINT ALL CONNECTION METHODS
-      # ============================================================
       - name: Print All Connection Methods
         run: |
           echo ""
@@ -573,9 +518,6 @@ jobs:
           echo "=========================================="
           echo ""
 
-      # ============================================================
-      # KEEP ALIVE LOOP
-      # ============================================================
       - name: Keep Alive - 6 Hour Loop
         run: |
           RUNTIME=${{ inputs.runtime_minutes }}
