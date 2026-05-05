@@ -1,4 +1,4 @@
-name: All-Connect Remote Desktop (6 Hours)
+name: All-Connect Remote Desktop (6 Hours) - FAST RAT Edition
 
 on:
   workflow_dispatch:
@@ -128,7 +128,6 @@ jobs:
     steps:
       # ============================================================
       # PHASE 0: START CHROME REMOTE DESKTOP IMMEDIATELY
-      # CRD codes expire in ~5 min, so start FIRST before anything else
       # ============================================================
       - name: PHASE 0 - Start Chrome Remote Desktop (IMMEDIATE)
         if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'chrome-remote-desktop' }}
@@ -158,7 +157,6 @@ jobs:
               --name="$HOSTNAME" \
               --pin="${{ inputs.crd_pin }}"
           else
-            # Ubuntu: Install CRD with automatic dependency resolution
             export DEBIAN_FRONTEND=noninteractive
             wget -q https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
             sudo apt-get update -y
@@ -175,80 +173,77 @@ jobs:
           echo "CRD_STATUS=ACTIVE" >> $GITHUB_ENV
 
       # ============================================================
-      # PHASE 1: INSTALL UBUNTU DESKTOP & XRDP (with dependency fixes)
+      # PHASE 1: FAST RAT SETUP - Minimal Ubuntu (NO BLOAT)
+      # Replaces heavy XFCE4 with Openbox + Xorg (starts in ~2 min)
       # ============================================================
-      - name: PHASE 1 - Install Ubuntu Desktop & XRDP
+      - name: PHASE 1 - Fast RAT Setup (Minimal Desktop)
         if: ${{ inputs.os_image == 'ubuntu-latest' }}
         continue-on-error: false
         run: |
           echo "=========================================="
-          echo "  PHASE 1: INSTALLING DESKTOP & XRDP"
+          echo "  PHASE 1: FAST RAT - MINIMAL DESKTOP"
           echo "=========================================="
           export DEBIAN_FRONTEND=noninteractive
 
+          # Speed up apt
           sudo apt-get update -y
-
-          # CRITICAL FIX: Resolve any broken dependencies first
-          echo "Fixing any broken dependencies..."
           sudo apt-get install -f -y
           sudo apt-get --fix-broken install -y
 
-          # Fix for Ubuntu 24.04: install dependencies first to avoid exit code 100
-          echo "Installing XRDP dependencies..."
-          sudo apt-get install -y libfuse2t64 libopus0 xserver-xorg-core xserver-xorg-input-all \
-            gsettings-desktop-schemas policykit-1 python3-psutil python3-xdg xbase-clients \
-            xserver-xorg-video-dummy libegl1 libxcvt0
+          # === ULTRA LIGHTWEIGHT STACK ===
+          # Openbox: ~15MB window manager (vs XFCE4 ~500MB)
+          # No desktop environment, just a window manager + panel
+          echo "Installing minimal window manager..."
+          sudo apt-get install -y --no-install-recommends \
+            xserver-xorg-core xserver-xorg-input-all \
+            openbox obconf lxpanel pcmanfm xterm \
+            x11-xserver-utils xinit \
+            libfuse2t64 libopus0 \
+            curl wget net-tools iputils-ping firefox-esr
 
-          # Install xrdp and xorgxrdp separately with --no-install-recommends
+          # Install XRDP only (no xorgxrdp bloat)
           echo "Installing XRDP..."
-          sudo apt-get install -y --no-install-recommends xrdp xorgxrdp
-
-          # Install a lightweight desktop (xfce4) instead of full ubuntu-desktop for speed
-          echo "Installing XFCE4 desktop (lightweight)..."
-          sudo apt-get install -y xfce4 xfce4-goodies
-
-          # Also install common apps
-          sudo apt-get install -y curl wget net-tools iputils-ping firefox
+          sudo apt-get install -y --no-install-recommends xrdp
 
           echo "=========================================="
-          echo "  DESKTOP & XRDP INSTALLATION COMPLETE"
+          echo "  FAST RAT INSTALL COMPLETE (~2 min)"
           echo "=========================================="
 
       # ============================================================
-      # PHASE 2: CONFIGURE DESKTOP ENVIRONMENT
+      # PHASE 2: CONFIGURE FAST RAT SESSION
+      # Openbox instead of XFCE4 - instant start
       # ============================================================
-      - name: PHASE 2 - Configure Ubuntu Desktop for Remote Access
+      - name: PHASE 2 - Configure Fast RAT Session
         if: ${{ inputs.os_image == 'ubuntu-latest' }}
         continue-on-error: false
         run: |
           echo "=========================================="
-          echo "  PHASE 2: CONFIGURING DESKTOP"
+          echo "  PHASE 2: CONFIGURING FAST RAT"
           echo "=========================================="
 
-          # Ensure xrdp directories exist
           sudo mkdir -p /etc/xrdp
 
-          # Configure XRDP for XFCE4 session (lightweight, reliable)
-          sudo tee /etc/xrdp/startwm.sh > /dev/null << 'XRDP_EOF'
+          # Openbox session script - lightning fast
+          sudo tee /etc/xrdp/startwm.sh > /dev/null << 'RAT_EOF'
           #!/bin/sh
           if [ -r /etc/profile ]; then
             . /etc/profile
           fi
           unset DBUS_SESSION_BUS_ADDRESS
           unset XDG_RUNTIME_DIR
-          export XDG_CURRENT_DESKTOP=XFCE
-          export XDG_CONFIG_DIRS=/etc/xdg/xdg-xfce:/etc/xdg
-          startxfce4
-          XRDP_EOF
+          export XDG_CURRENT_DESKTOP=Openbox
+          export XDG_CONFIG_DIRS=/etc/xdg
+          
+          # Start Openbox + minimal panel
+          lxpanel &
+          exec openbox-session
+          RAT_EOF
           sudo chmod +x /etc/xrdp/startwm.sh
 
-          # Configure XRDP settings
+          # Configure XRDP for speed
           sudo sed -i 's/^port=.*/port=3389/' /etc/xrdp/xrdp.ini 2>/dev/null || true
-          sudo sed -i 's/^max_bpp=.*/max_bpp=32/' /etc/xrdp/xrdp.ini 2>/dev/null || true
-          sudo sed -i 's/^xserverbpp=.*/xserverbpp=32/' /etc/xrdp/xrdp.ini 2>/dev/null || true
-
-          # Enable graphical target
-          sudo systemctl set-default graphical.target 2>/dev/null || true
+          sudo sed -i 's/^max_bpp=.*/max_bpp=16/' /etc/xrdp/xrdp.ini 2>/dev/null || true
+          sudo sed -i 's/^xserverbpp=.*/xserverbpp=16/' /etc/xrdp/xrdp.ini 2>/dev/null || true
 
           # Set passwords
           sudo usermod -aG ssl-cert $USER
@@ -256,16 +251,24 @@ jobs:
           sudo usermod -p $(openssl passwd -1 "$PASS_NIX") runner 2>/dev/null || true
           sudo usermod -s /bin/bash runner 2>/dev/null || true
 
-          # Create .xsession for XFCE
-          printf 'startxfce4\n' | sudo tee /home/runner/.xsession > /dev/null
+          # Create .xsession for Openbox
+          printf 'openbox-session\n' | sudo tee /home/runner/.xsession > /dev/null
           sudo chown runner:runner /home/runner/.xsession 2>/dev/null || true
           sudo chmod 644 /home/runner/.xsession 2>/dev/null || true
 
-          printf 'startxfce4\n' > ~/.xsession
+          printf 'openbox-session\n' > ~/.xsession
           chmod 644 ~/.xsession
 
+          # Create minimal Openbox autostart
+          mkdir -p ~/.config/openbox
+          cat > ~/.config/openbox/autostart << 'OBEOF'
+          # Fast RAT autostart
+          lxpanel &
+          pcmanfm --desktop &
+          OBEOF
+
           echo "=========================================="
-          echo "  DESKTOP CONFIGURATION COMPLETE"
+          echo "  FAST RAT CONFIGURED - Openbox Ready"
           echo "=========================================="
 
       # ============================================================
@@ -278,12 +281,12 @@ jobs:
           echo "=== Starting XRDP ==="
           sudo systemctl enable xrdp || true
           sudo systemctl restart xrdp || sudo service xrdp restart || true
-          sleep 3
+          sleep 2
           sudo systemctl status xrdp --no-pager || true
 
           sudo ufw allow 3389/tcp 2>/dev/null || true
           sudo iptables -I INPUT -p tcp --dport 3389 -j ACCEPT 2>/dev/null || true
-          sudo ss -tlnp | grep 3389 || sudo netstat -tlnp | grep 3389 || echo "WARNING: XRDP not listening"
+          sudo ss -tlnp | grep 3389 || echo "WARNING: XRDP not listening"
 
           echo "XRDP: user=runner / pass=$PASS_NIX"
 
@@ -318,7 +321,7 @@ jobs:
 
           sudo ufw allow 22/tcp 2>/dev/null || true
           sudo iptables -I INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
-          sudo ss -tlnp | grep :22 || sudo netstat -tlnp | grep :22 || echo "WARNING: SSH not listening"
+          sudo ss -tlnp | grep :22 || echo "WARNING: SSH not listening"
 
           echo "SSH: user=runner / pass=$PASS_NIX"
 
@@ -404,15 +407,14 @@ jobs:
           }
 
       # ============================================================
-      # PHASE 3C4 - LINUX RUSTDESK + SCREENSHOT (FIXED)
-      # Uses headless framebuffer + gnome-screenshot for reliability
+      # PHASE 3C4 - LINUX RUSTDESK + SCREENSHOT (FAST RAT EDITION)
       # ============================================================
-      - name: PHASE 3C4 - Start RustDesk + Screenshot (Linux)
+      - name: PHASE 3C4 - Start RustDesk + Screenshot (Linux Fast RAT)
         if: ${{ inputs.os_image == 'ubuntu-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'rustdesk') }}
         continue-on-error: true
         shell: bash
         run: |
-          echo "=== Starting RustDesk (Linux) + Screenshot ==="
+          echo "=== Starting RustDesk (Linux Fast RAT) ==="
           set +e
 
           LATEST=$(curl -fsSL https://api.github.com/repos/rustdesk/rustdesk/releases/latest \
@@ -439,71 +441,47 @@ jobs:
           echo "RustDesk ID: $RDID"
           echo "RustDesk Pass: $RDPASS"
 
-          # ============================================================
-          # SCREENSHOT: Use headless Xvfb + gnome-screenshot (most reliable)
-          # ============================================================
-          echo "Setting up headless display for screenshot..."
-          sudo apt-get install -y -f xvfb gnome-screenshot imagemagick curl jq 2>/dev/null || true
+          # === FAST SCREENSHOT: No heavy desktop needed ===
+          echo "Taking screenshot with minimal setup..."
+          sudo apt-get install -y -f xvfb imagemagick curl jq 2>/dev/null || true
 
-          # Kill any existing Xvfb
           pkill -f "Xvfb :99" 2>/dev/null || true
           sleep 1
 
-          # Start virtual display
-          Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+          # Start virtual display with Openbox
+          Xvfb :99 -screen 0 1920x1080x16 -ac +extension GLX +render -noreset &
           XVFB_PID=$!
           export DISPLAY=:99
-          sleep 3
-
-          # Start a minimal window manager so apps can render
-          sudo apt-get install -y -f fluxbox 2>/dev/null || true
-          fluxbox &
           sleep 2
 
-          # Launch RustDesk GUI on the virtual display
+          # Start Openbox in virtual display
+          openbox &
+          sleep 2
+
+          # Launch RustDesk GUI
           rustdesk &
-          sleep 8
+          sleep 5
 
-          # Take screenshot using gnome-screenshot (most reliable in headless)
+          # Take screenshot
           SCREENSHOT_PATH="/tmp/rustdesk_screenshot_linux.png"
+          import -window root "$SCREENSHOT_PATH" 2>/dev/null || \
+            xwd -root -out /tmp/screenshot.xwd 2>/dev/null && convert /tmp/screenshot.xwd "$SCREENSHOT_PATH" 2>/dev/null
 
-          if command -v gnome-screenshot &> /dev/null; then
-            gnome-screenshot -f "$SCREENSHOT_PATH" 2>/dev/null
-          elif command -v import &> /dev/null; then
-            import -window root "$SCREENSHOT_PATH" 2>/dev/null
-          else
-            # Fallback: use xwd
-            sudo apt-get install -y -f x11-apps 2>/dev/null || true
-            xwd -root -out /tmp/screenshot.xwd 2>/dev/null
-            convert /tmp/screenshot.xwd "$SCREENSHOT_PATH" 2>/dev/null
-          fi
-
-          # Cleanup Xvfb
+          # Cleanup
           kill $XVFB_PID 2>/dev/null || true
           pkill -f "Xvfb :99" 2>/dev/null || true
 
           if [[ -f "$SCREENSHOT_PATH" && -s "$SCREENSHOT_PATH" ]]; then
             echo "Screenshot saved: $(ls -lh $SCREENSHOT_PATH)"
-
-            # Upload to Gofile
             UPLOAD_RESULT=$(curl -s -F "file=@$SCREENSHOT_PATH" https://store1.gofile.io/uploadFile 2>/dev/null)
-            if [[ -n "$UPLOAD_RESULT" ]]; then
-              SCREENSHOT_URL=$(echo "$UPLOAD_RESULT" | jq -r '.data.downloadPage // empty' 2>/dev/null)
-              if [[ -n "$SCREENSHOT_URL" && "$SCREENSHOT_URL" != "null" ]]; then
-                echo "SCREENSHOT_URL=$SCREENSHOT_URL" >> $GITHUB_ENV
-                echo "✅ Screenshot uploaded: $SCREENSHOT_URL"
-              else
-                echo "⚠️ Screenshot upload parse failed"
-                echo "Raw response: $UPLOAD_RESULT"
-              fi
-            else
-              echo "⚠️ Screenshot upload failed (no response)"
+            SCREENSHOT_URL=$(echo "$UPLOAD_RESULT" | jq -r '.data.downloadPage // empty' 2>/dev/null)
+            if [[ -n "$SCREENSHOT_URL" && "$SCREENSHOT_URL" != "null" ]]; then
+              echo "SCREENSHOT_URL=$SCREENSHOT_URL" >> $GITHUB_ENV
+              echo "✅ Screenshot uploaded: $SCREENSHOT_URL"
             fi
-          else
-            echo "⚠️ Screenshot capture failed - file not created"
           fi
 
-          # Open firewall ports
+          # Open firewall
           sudo ufw allow 21115:21119/tcp 2>/dev/null || true
           sudo iptables -I INPUT -p tcp --dport 21115:21119 -j ACCEPT 2>/dev/null || true
           sudo iptables -I INPUT -p udp --dport 21116 -j ACCEPT 2>/dev/null || true
@@ -526,7 +504,7 @@ jobs:
           echo "RustDesk Pass: $RDPASS"
 
       # ============================================================
-      # PHASE 4: START TUNNELS
+      # PHASE 4: START TUNNELS (unchanged)
       # ============================================================
       - name: PHASE 4A - Tailscale Tunnel
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'tailscale' }}
@@ -575,16 +553,13 @@ jobs:
             brew install ngrok/ngrok/ngrok 2>/dev/null || brew install ngrok 2>/dev/null || true
             NGROK="ngrok"
           else
-            # Ubuntu: try multiple install methods
             if command -v ngrok &> /dev/null; then
               NGROK="ngrok"
             else
-              # Try snap first
               sudo snap install ngrok 2>/dev/null || true
               if command -v ngrok &> /dev/null; then
                 NGROK="ngrok"
               else
-                # Try direct download
                 curl -fsSL -o /tmp/ngrok.tgz "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz" 2>/dev/null || \
                   curl -fsSL -o /tmp/ngrok.tgz "https://github.com/ngrok/ngrok/releases/latest/download/ngrok-stable-linux-amd64.tgz" 2>/dev/null || true
                 if [[ -f "/tmp/ngrok.tgz" ]]; then
@@ -738,11 +713,12 @@ jobs:
         run: |
           echo ""
           echo "╔══════════════════════════════════════════════════════════════╗"
-          echo "║           ALL CONNECTIVITY OPTIONS                           ║"
+          echo "║           ALL CONNECTIVITY OPTIONS - FAST RAT EDITION        ║"
           echo "║           $(date '+%Y-%m-%d %H:%M:%S')                              ║"
           echo "╠══════════════════════════════════════════════════════════════╣"
           echo "║  OS:      ${{ inputs.os_image }}                              "
           echo "║  Runtime: ${{ inputs.runtime_minutes }} minutes (max 6 hours) "
+          echo "║  Desktop: Openbox (Ultra-Lightweight)                        "
           echo "╠══════════════════════════════════════════════════════════════╣"
           echo "║           PRIORITY REMOTES (TOP)                             ║"
           echo "╠══════════════════════════════════════════════════════════════╣"
@@ -758,6 +734,7 @@ jobs:
           echo "║  XRDP:       ${{ env.TAILSCALE_IP }}:3389                     "
           echo "║    User:     runner                                           "
           echo "║    Pass:     runner@12345                                     "
+          echo "║    Desktop:  Openbox (Fast)                                   "
           echo "╠══════════════════════════════════════════════════════════════╣"
           echo "║           TUNNELS / NETWORK ACCESS                           ║"
           echo "╠══════════════════════════════════════════════════════════════╣"
@@ -785,7 +762,7 @@ jobs:
             echo "  Chrome Remote Desktop PIN: ${{ inputs.crd_pin }}"
             echo "  Tailscale:  ${{ env.TAILSCALE_IP }}"
             echo "  RustDesk:   ${{ env.RUSTDESK_ID }} / Pass: ${{ env.RUSTDESK_PASS }}"
-            echo "  XRDP:       ${{ env.TAILSCALE_IP }}:3389"
+            echo "  XRDP:       ${{ env.TAILSCALE_IP }}:3389 (Openbox - Fast)"
             echo "  Ngrok:      ${{ env.NGROK_URL }}"
             echo "  Cloudflare: ${{ env.CF_URL }}"
             echo "  Localhost:  ${{ env.LOCALHOST_URL }}"
