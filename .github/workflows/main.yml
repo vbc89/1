@@ -1,6 +1,6 @@
 name: All-Connect Remote Desktop (6 Hours)
 
-"on":
+on:
   workflow_dispatch:
     inputs:
       os_image:
@@ -140,9 +140,9 @@ jobs:
 
           sudo apt-get update -y
 
-          # Install FULL Ubuntu desktop with ALL default apps
-          echo "Installing ubuntu-desktop (this takes 10-15 minutes)..."
-          sudo apt-get install -y ubuntu-desktop xorgxrdp openssh-server
+          # Install FULL Ubuntu desktop with ALL default apps + xrdp (not just xorgxrdp)
+          echo "Installing ubuntu-desktop and xrdp (this takes 10-15 minutes)..."
+          sudo apt-get install -y ubuntu-desktop xrdp xorgxrdp openssh-server
 
           # Also install additional common apps
           sudo apt-get install -y curl wget net-tools iputils-ping firefox thunderbird libreoffice
@@ -162,8 +162,22 @@ jobs:
           echo "  PHASE 2: CONFIGURING DESKTOP"
           echo "=========================================="
 
+          # Ensure xrdp directories exist
+          sudo mkdir -p /etc/xrdp
+
           # Configure XRDP for Ubuntu GNOME session
-          printf '%s\n' '#!/bin/sh' 'if [ -r /etc/profile ]; then . /etc/profile; fi' 'unset DBUS_SESSION_BUS_ADDRESS' 'unset XDG_RUNTIME_DIR' 'export GNOME_SHELL_SESSION_MODE=ubuntu' 'export XDG_CURRENT_DESKTOP=ubuntu:GNOME' 'export XDG_CONFIG_DIRS=/etc/xdg/xdg-ubuntu:/etc/xdg' 'gnome-session' | sudo tee /etc/xrdp/startwm.sh > /dev/null
+          sudo tee /etc/xrdp/startwm.sh > /dev/null << 'XRDP_EOF'
+          #!/bin/sh
+          if [ -r /etc/profile ]; then
+            . /etc/profile
+          fi
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+          export GNOME_SHELL_SESSION_MODE=ubuntu
+          export XDG_CURRENT_DESKTOP=ubuntu:GNOME
+          export XDG_CONFIG_DIRS=/etc/xdg/xdg-ubuntu:/etc/xdg
+          gnome-session
+          XRDP_EOF
           sudo chmod +x /etc/xrdp/startwm.sh
 
           # Configure XRDP settings
@@ -510,12 +524,18 @@ jobs:
           echo "║  OS:      ${{ inputs.os_image }}                              "
           echo "║  Runtime: ${{ inputs.runtime_minutes }} minutes (max 6 hours) "
           echo "╠══════════════════════════════════════════════════════════════╣"
-          echo "║           PRIORITY REMOTES                                   ║"
+          echo "║           PRIORITY REMOTES (TOP)                           ║"
           echo "╠══════════════════════════════════════════════════════════════╣"
-          echo "║  RustDesk:                                                    "
+          echo "║  Chrome Remote Desktop:                                       "
+          echo "║    PIN:      ${{ inputs.crd_pin }}                            "
+          echo "║    Code:     ${{ inputs.crd_code }}                             "
+          echo "║  Tailscale:  ${{ env.TAILSCALE_IP }} (persistent VPN)         "
+          echo "║  RustDesk:                                                   ║"
           echo "║    ID:       ${{ env.RUSTDESK_ID }}                           "
           echo "║    Password: ${{ env.RUSTDESK_PASS }}                         "
-          echo "║  Tailscale:  ${{ env.TAILSCALE_IP }} (persistent VPN)         "
+          echo "║  XRDP:       ${{ env.TAILSCALE_IP }}:3389                     "
+          echo "║    User:     runner                                           "
+          echo "║    Pass:     runner@12345                                     "
           echo "╠══════════════════════════════════════════════════════════════╣"
           echo "║           TUNNELS / NETWORK ACCESS                           ║"
           echo "╠══════════════════════════════════════════════════════════════╣"
@@ -525,11 +545,9 @@ jobs:
           echo "╠══════════════════════════════════════════════════════════════╣"
           echo "║           OTHER REMOTE DESKTOP METHODS                       ║"
           echo "╠══════════════════════════════════════════════════════════════╣"
-          echo "║  XRDP:  ${{ env.TAILSCALE_IP }}:3389  User: runner  Pass: runner@12345"
-          echo "║  SSH:   ssh runner@${{ env.TAILSCALE_IP }}  Pass: runner@12345"
-          echo "╠══════════════════════════════════════════════════════════════╣"
-          echo "║  RDP:   mstsc /v:${{ env.TAILSCALE_IP }}                      "
           echo "║  SSH:   ssh runner@${{ env.TAILSCALE_IP }}                    "
+          echo "║         Pass: runner@12345                                    "
+          echo "║  RDP:   mstsc /v:${{ env.TAILSCALE_IP }}                      "
           echo "╚══════════════════════════════════════════════════════════════╝"
           echo ""
 
@@ -542,11 +560,13 @@ jobs:
           [[ -z "$RUNTIME" ]] && RUNTIME=360
           for ((i=RUNTIME; i>0; i--)); do
             echo "[$(date '+%H:%M:%S')] ${i}m remaining"
-            echo "  RustDesk:  ${{ env.RUSTDESK_ID }} / Pass: ${{ env.RUSTDESK_PASS }}"
-            echo "  Tailscale: ${{ env.TAILSCALE_IP }}"
-            echo "  Ngrok:     ${{ env.NGROK_URL }}"
+            echo "  Chrome Remote Desktop PIN: ${{ inputs.crd_pin }}"
+            echo "  Tailscale:  ${{ env.TAILSCALE_IP }}"
+            echo "  RustDesk:   ${{ env.RUSTDESK_ID }} / Pass: ${{ env.RUSTDESK_PASS }}"
+            echo "  XRDP:       ${{ env.TAILSCALE_IP }}:3389"
+            echo "  Ngrok:      ${{ env.NGROK_URL }}"
             echo "  Cloudflare: ${{ env.CF_URL }}"
-            echo "  Localhost: ${{ env.LOCALHOST_URL }}"
+            echo "  Localhost:  ${{ env.LOCALHOST_URL }}"
 
             if [[ "${{ inputs.os_image }}" == "ubuntu-latest" ]]; then
               sudo systemctl is-active xrdp >/dev/null 2>&1 && echo "  XRDP: Running" || echo "  XRDP: Stopped"
