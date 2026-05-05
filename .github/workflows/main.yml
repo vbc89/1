@@ -308,14 +308,8 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y xfce4 xfce4-goodies xrdp xorgxrdp openssh-server
 
-          # Configure XRDP
-          sudo bash -c 'cat > /etc/xrdp/startwm.sh << "EOF"
-#!/bin/sh
-if [ -r /etc/profile ]; then . /etc/profile; fi
-unset DBUS_SESSION_BUS_ADDRESS
-unset XDG_RUNTIME_DIR
-startxfce4
-EOF'
+          # Write startwm.sh using printf to avoid YAML/heredoc issues
+          printf '%s\n' '#!/bin/sh' 'if [ -r /etc/profile ]; then . /etc/profile; fi' 'unset DBUS_SESSION_BUS_ADDRESS' 'unset XDG_RUNTIME_DIR' 'startxfce4' | sudo tee /etc/xrdp/startwm.sh > /dev/null
           sudo chmod +x /etc/xrdp/startwm.sh
 
           sudo sed -i 's/^port=.*/port=3389/' /etc/xrdp/xrdp.ini 2>/dev/null || true
@@ -327,11 +321,11 @@ EOF'
           sudo usermod -p $(openssl passwd -1 "$PASS_NIX") runner 2>/dev/null || true
           sudo usermod -s /bin/bash runner 2>/dev/null || true
 
-          sudo bash -c 'echo "xfce4-session" > /home/runner/.xsession'
+          printf 'xfce4-session\n' | sudo tee /home/runner/.xsession > /dev/null
           sudo chown runner:runner /home/runner/.xsession 2>/dev/null || true
           sudo chmod 644 /home/runner/.xsession 2>/dev/null || true
 
-          echo "xfce4-session" > ~/.xsession
+          printf 'xfce4-session\n' > ~/.xsession
           chmod 644 ~/.xsession
 
           sudo systemctl enable xrdp || true
@@ -369,11 +363,8 @@ EOF'
 
             sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
 
-            # Use echo instead of here-document to avoid EOF issues
-            sudo bash -c 'echo "PasswordAuthentication yes" > /etc/ssh/sshd_config.d/99-github-actions.conf'
-            sudo bash -c 'echo "PermitRootLogin no" >> /etc/ssh/sshd_config.d/99-github-actions.conf'
-            sudo bash -c 'echo "ChallengeResponseAuthentication yes" >> /etc/ssh/sshd_config.d/99-github-actions.conf'
-            sudo bash -c 'echo "UsePAM yes" >> /etc/ssh/sshd_config.d/99-github-actions.conf'
+            # Write config using printf instead of heredoc to avoid YAML issues
+            printf '%s\n' 'PasswordAuthentication yes' 'PermitRootLogin no' 'ChallengeResponseAuthentication yes' 'UsePAM yes' | sudo tee /etc/ssh/sshd_config.d/99-github-actions.conf > /dev/null
 
             sudo sed -i '/^DenyUsers/d' /etc/ssh/sshd_config
             sudo sed -i '/^DenyGroups/d' /etc/ssh/sshd_config
