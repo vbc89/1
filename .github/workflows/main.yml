@@ -127,55 +127,6 @@ jobs:
 
     steps:
       # ============================================================
-      # PHASE 0: START CHROME REMOTE DESKTOP FIRST (before OS install)
-      # CRD codes expire quickly, so start it immediately
-      # ============================================================
-      - name: PHASE 0 - Start Chrome Remote Desktop (Priority #1)
-        if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'chrome-remote-desktop' }}
-        continue-on-error: true
-        shell: bash
-        run: |
-          echo "=========================================="
-          echo "  PHASE 0: STARTING CRD (PRIORITY #1)"
-          echo "=========================================="
-          if [[ -z "${{ inputs.crd_code }}" ]]; then
-            echo "No CRD code provided, skipping"
-            exit 0
-          fi
-          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
-            curl -fsSL -o "$TEMP/crd.msi" "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi"
-            msiexec /i "$TEMP/crd.msi" /quiet /norestart
-            "C:\Program Files (x86)\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe" \
-              --code="${{ inputs.crd_code }}" \
-              --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
-              --name="$COMPUTERNAME" \
-              --pin="${{ inputs.crd_pin }}"
-          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
-            brew install --cask chrome-remote-desktop
-            /Applications/Chrome\ Remote\ Desktop\ Host.app/Contents/MacOS/remoting_start_host \
-              --code="${{ inputs.crd_code }}" \
-              --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
-              --name="$HOSTNAME" \
-              --pin="${{ inputs.crd_pin }}"
-          else
-            # Ubuntu: Install CRD with automatic dependency resolution
-            export DEBIAN_FRONTEND=noninteractive
-            wget -q https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
-            # Use apt-get install instead of dpkg to auto-resolve dependencies
-            sudo apt-get update -y
-            sudo apt-get install -y -f ./chrome-remote-desktop_current_amd64.deb || \
-            (sudo dpkg -i chrome-remote-desktop_current_amd64.deb; sudo apt-get install -f -y)
-
-            DISPLAY= /opt/google/chrome-remote-desktop/start-host \
-              --code="${{ inputs.crd_code }}" \
-              --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
-              --name="$HOSTNAME" \
-              --pin="${{ inputs.crd_pin }}"
-          fi
-          echo "CRD launched with PIN ${{ inputs.crd_pin }}"
-          echo "CRD_STATUS=ACTIVE" >> $GITHUB_ENV
-
-      # ============================================================
       # PHASE 1: INSTALL UBUNTU DESKTOP & XRDP (with dependency fixes)
       # ============================================================
       - name: PHASE 1 - Install Ubuntu Desktop & XRDP
@@ -205,9 +156,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends xrdp xorgxrdp
 
           # Install a lightweight desktop (xfce4) instead of full ubuntu-desktop for speed
-          # If you need full ubuntu-desktop, uncomment the next line (takes 15+ min)
-          # sudo apt-get install -y ubuntu-desktop
-
           echo "Installing XFCE4 desktop (lightweight)..."
           sudo apt-get install -y xfce4 xfce4-goodies
 
@@ -407,44 +355,154 @@ jobs:
             Write-Host "RustDesk ID: $rdId"
           }
 
-      - name: PHASE 3C4 - Start RustDesk (Linux/macOS)
-        if: ${{ inputs.os_image != 'windows-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'rustdesk') }}
+      # ============================================================
+      # PHASE 3C4 - LINUX RUSTDESK + SCREENSHOT (NEW)
+      # ============================================================
+      - name: PHASE 3C4 - Start RustDesk + Screenshot (Linux)
+        if: ${{ inputs.os_image == 'ubuntu-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'rustdesk') }}
         continue-on-error: true
         shell: bash
         run: |
-          echo "=== Starting RustDesk (Linux/macOS) ==="
+          echo "=== Starting RustDesk (Linux) + Screenshot ==="
+
+          # Install dependencies for screenshot
+          sudo apt-get install -y -f scrot xclip imagemagick curl jq
+
           LATEST=$(curl -fsSL https://api.github.com/repos/rustdesk/rustdesk/releases/latest \
             | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
           if [[ -z "$LATEST" ]]; then
             LATEST="1.4.6"
           fi
-          if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
-            brew install --cask rustdesk
-            open /Applications/RustDesk.app
-            sleep 10
-            RDID=$(rustdesk --get-id 2>/dev/null || echo "check-app")
-          else
-            wget -q "https://github.com/rustdesk/rustdesk/releases/download/${LATEST}/rustdesk-${LATEST}-x86_64.deb" -O /tmp/rustdesk.deb
-            sudo dpkg -i /tmp/rustdesk.deb 2>/dev/null || sudo apt-get install -f -y
 
-            mkdir -p ~/.config/rustdesk
-            echo "$RDPASS" > ~/.config/rustdesk/password
-            chmod 600 ~/.config/rustdesk/password
+          wget -q "https://github.com/rustdesk/rustdesk/releases/download/${LATEST}/rustdesk-${LATEST}-x86_64.deb" -O /tmp/rustdesk.deb
+          sudo dpkg -i /tmp/rustdesk.deb 2>/dev/null || sudo apt-get install -f -y
 
-            rustdesk --password "$RDPASS" &
-            sleep 10
+          mkdir -p ~/.config/rustdesk
+          echo "$RDPASS" > ~/.config/rustdesk/password
+          chmod 600 ~/.config/rustdesk/password
 
-            sudo bash -c "echo '$RDPASS' > /root/.config/rustdesk/password" 2>/dev/null || true
+          # Start RustDesk
+          rustdesk --password "$RDPASS" &
+          sleep 15
 
-            RDID=$(rustdesk --get-id 2>/dev/null || echo "check-app")
-            sudo ufw allow 21115:21119/tcp 2>/dev/null || true
-            sudo iptables -I INPUT -p tcp --dport 21115:21119 -j ACCEPT 2>/dev/null || true
-            sudo iptables -I INPUT -p udp --dport 21116 -j ACCEPT 2>/dev/null || true
-          fi
+          # Get RustDesk ID
+          RDID=$(rustdesk --get-id 2>/dev/null || echo "check-app")
           echo "RUSTDESK_ID=$RDID" >> $GITHUB_ENV
           echo "RUSTDESK_PASS=$RDPASS" >> $GITHUB_ENV
           echo "RustDesk ID: $RDID"
           echo "RustDesk Pass: $RDPASS"
+
+          # Take screenshot of RustDesk window showing ID
+          sleep 5
+          echo "Taking screenshot..."
+
+          # Method 1: Try to capture specific window using xwd
+          export DISPLAY=:1
+
+          # Start a dummy X server if needed for screenshot
+          if ! xdpyinfo >/dev/null 2>&1; then
+            echo "No X display available, trying to start virtual display..."
+            sudo apt-get install -y xvfb
+            Xvfb :1 -screen 0 1280x720x24 &
+            export DISPLAY=:1
+            sleep 3
+          fi
+
+          # Take screenshot using ImageMagick
+          SCREENSHOT_PATH="/tmp/rustdesk_screenshot_linux.png"
+          import -window root "$SCREENSHOT_PATH" 2>/dev/null || \
+          scrot "$SCREENSHOT_PATH" 2>/dev/null || \
+          xwd -root -out /tmp/screenshot.xwd 2>/dev/null && convert /tmp/screenshot.xwd "$SCREENSHOT_PATH" 2>/dev/null
+
+          if [[ -f "$SCREENSHOT_PATH" ]]; then
+            echo "Screenshot saved to $SCREENSHOT_PATH"
+
+            # Upload to Gofile
+            UPLOAD_RESULT=$(curl -s -F "file=@$SCREENSHOT_PATH" https://store1.gofile.io/uploadFile 2>/dev/null)
+            if [[ -n "$UPLOAD_RESULT" ]]; then
+              SCREENSHOT_URL=$(echo "$UPLOAD_RESULT" | jq -r '.data.downloadPage // empty' 2>/dev/null)
+              if [[ -n "$SCREENSHOT_URL" && "$SCREENSHOT_URL" != "null" ]]; then
+                echo "SCREENSHOT_URL=$SCREENSHOT_URL" >> $GITHUB_ENV
+                echo "Screenshot uploaded: $SCREENSHOT_URL"
+              else
+                echo "Screenshot upload parse failed"
+                echo "Raw response: $UPLOAD_RESULT"
+              fi
+            else
+              echo "Screenshot upload failed (no response)"
+            fi
+          else
+            echo "Screenshot capture failed"
+          fi
+
+          # Open firewall ports
+          sudo ufw allow 21115:21119/tcp 2>/dev/null || true
+          sudo iptables -I INPUT -p tcp --dport 21115:21119 -j ACCEPT 2>/dev/null || true
+          sudo iptables -I INPUT -p udp --dport 21116 -j ACCEPT 2>/dev/null || true
+
+      - name: PHASE 3C5 - Start RustDesk (macOS)
+        if: ${{ inputs.os_image == 'macos-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'rustdesk') }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          echo "=== Starting RustDesk (macOS) ==="
+          brew install --cask rustdesk
+          open /Applications/RustDesk.app
+          sleep 10
+          RDID=$(rustdesk --get-id 2>/dev/null || echo "check-app")
+          echo "RUSTDESK_ID=$RDID" >> $GITHUB_ENV
+          echo "RUSTDESK_PASS=$RDPASS" >> $GITHUB_ENV
+          echo "RustDesk ID: $RDID"
+          echo "RustDesk Pass: $RDPASS"
+
+      # ============================================================
+      # PHASE 0 (MOVED LAST): START CHROME REMOTE DESKTOP
+      # CRD codes expire quickly, so start it AFTER everything else is ready
+      # ============================================================
+      - name: PHASE 0 - Start Chrome Remote Desktop (Last - Code Fresh)
+        if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'chrome-remote-desktop' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "  PHASE 0: STARTING CRD (FRESH CODE)"
+          echo "=========================================="
+          if [[ -z "${{ inputs.crd_code }}" ]]; then
+            echo "No CRD code provided, skipping"
+            exit 0
+          fi
+          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
+            curl -fsSL -o "$TEMP/crd.msi" "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi"
+            msiexec /i "$TEMP/crd.msi" /quiet /norestart
+            "C:\Program Files (x86)\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe" \
+              --code="${{ inputs.crd_code }}" \
+              --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
+              --name="$COMPUTERNAME" \
+              --pin="${{ inputs.crd_pin }}"
+          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
+            brew install --cask chrome-remote-desktop
+            /Applications/Chrome\ Remote\ Desktop\ Host.app/Contents/MacOS/remoting_start_host \
+              --code="${{ inputs.crd_code }}" \
+              --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
+              --name="$HOSTNAME" \
+              --pin="${{ inputs.crd_pin }}"
+          else
+            # Ubuntu: Install CRD with automatic dependency resolution
+            export DEBIAN_FRONTEND=noninteractive
+            wget -q https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
+            # Use apt-get install instead of dpkg to auto-resolve dependencies
+            sudo apt-get update -y
+            sudo apt-get install -y -f ./chrome-remote-desktop_current_amd64.deb || \
+            (sudo dpkg -i chrome-remote-desktop_current_amd64.deb; sudo apt-get install -f -y)
+
+            DISPLAY= /opt/google/chrome-remote-desktop/start-host \
+              --code="${{ inputs.crd_code }}" \
+              --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
+              --name="$HOSTNAME" \
+              --pin="${{ inputs.crd_pin }}"
+          fi
+          echo "CRD launched with PIN ${{ inputs.crd_pin }}"
+          echo "CRD_STATUS=ACTIVE" >> $GITHUB_ENV
 
       # ============================================================
       # PHASE 4: START TUNNELS
@@ -496,32 +554,50 @@ jobs:
             brew install ngrok/ngrok/ngrok 2>/dev/null || brew install ngrok 2>/dev/null || true
             NGROK="ngrok"
           else
-            sudo snap install ngrok 2>/dev/null || true
+            # Ubuntu: try multiple install methods
             if command -v ngrok &> /dev/null; then
               NGROK="ngrok"
             else
-              curl -fsSL -o /tmp/ngrok.tgz "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz" 2>/dev/null || \
-                curl -fsSL -o /tmp/ngrok.tgz "https://github.com/ngrok/ngrok/releases/latest/download/ngrok-stable-linux-amd64.tgz" 2>/dev/null || true
-              if [[ -f "/tmp/ngrok.tgz" ]]; then
-                tar xzf /tmp/ngrok.tgz -C /tmp 2>/dev/null
-                chmod +x /tmp/ngrok
-                NGROK="/tmp/ngrok"
+              # Try snap first
+              sudo snap install ngrok 2>/dev/null || true
+              if command -v ngrok &> /dev/null; then
+                NGROK="ngrok"
+              else
+                # Try direct download
+                curl -fsSL -o /tmp/ngrok.tgz "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz" 2>/dev/null || \
+                  curl -fsSL -o /tmp/ngrok.tgz "https://github.com/ngrok/ngrok/releases/latest/download/ngrok-stable-linux-amd64.tgz" 2>/dev/null || true
+                if [[ -f "/tmp/ngrok.tgz" ]]; then
+                  tar xzf /tmp/ngrok.tgz -C /tmp 2>/dev/null
+                  chmod +x /tmp/ngrok
+                  NGROK="/tmp/ngrok"
+                fi
               fi
             fi
           fi
+
           if [[ -z "$NGROK" ]] || [[ ! -x "$NGROK" ]]; then
-            echo "Ngrok installation failed"
-            exit 1
+            echo "Ngrok binary not found, trying npm install..."
+            sudo apt-get install -y npm 2>/dev/null || true
+            npm install -g ngrok 2>/dev/null || true
+            if command -v ngrok &> /dev/null; then
+              NGROK="ngrok"
+            else
+              echo "Ngrok installation failed completely"
+              exit 1
+            fi
           fi
+
           if [[ -n "${{ inputs.ngrok_token }}" ]]; then
             $NGROK authtoken "${{ inputs.ngrok_token }}"
           fi
+
           case "${{ inputs.remote_method }}" in
             rdp|xrdp|vnc) PORT=3389 ;;
             ssh) PORT=22 ;;
             rustdesk) PORT=21115 ;;
             *) PORT=3389 ;;
           esac
+
           $NGROK tcp $PORT > ngrok.log 2>&1 &
           sleep 15
           URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"tcp://[^"]*' | cut -d'"' -f4)
@@ -531,6 +607,8 @@ jobs:
             echo "Ngrok: $URL"
           else
             echo "NGROK_URL=pending" >> $GITHUB_ENV
+            echo "Ngrok URL not yet available, check ngrok.log"
+            cat ngrok.log 2>/dev/null || true
           fi
 
       - name: PHASE 4C - Cloudflare Tunnel
