@@ -126,19 +126,206 @@ jobs:
       RDPASS: RustDesk@2026Secure!
 
     steps:
-      - name: Setup Base Linux Environment
+      # ============================================================
+      # PHASE 1: INSTALL FULL UBUNTU OS FIRST
+      # ============================================================
+      - name: PHASE 1 - Install Full Ubuntu 22.04 Desktop
         if: ${{ inputs.os_image == 'ubuntu-latest' }}
+        continue-on-error: false
         run: |
-          echo "=== Updating System ==="
-          sudo apt-get update -y
-          sudo apt-get install -y curl wget net-tools iputils-ping
+          echo "=========================================="
+          echo "  PHASE 1: INSTALLING FULL UBUNTU OS"
+          echo "=========================================="
+          export DEBIAN_FRONTEND=noninteractive
 
-      - name: TUNNEL 1 - Tailscale
+          sudo apt-get update -y
+
+          # Install FULL Ubuntu desktop with ALL default apps
+          echo "Installing ubuntu-desktop (this takes 10-15 minutes)..."
+          sudo apt-get install -y ubuntu-desktop xorgxrdp openssh-server
+
+          # Also install additional common apps
+          sudo apt-get install -y curl wget net-tools iputils-ping firefox thunderbird libreoffice
+
+          echo "=========================================="
+          echo "  UBUNTU DESKTOP INSTALLATION COMPLETE"
+          echo "=========================================="
+
+      # ============================================================
+      # PHASE 2: CONFIGURE DESKTOP ENVIRONMENT
+      # ============================================================
+      - name: PHASE 2 - Configure Ubuntu Desktop for Remote Access
+        if: ${{ inputs.os_image == 'ubuntu-latest' }}
+        continue-on-error: false
+        run: |
+          echo "=========================================="
+          echo "  PHASE 2: CONFIGURING DESKTOP"
+          echo "=========================================="
+
+          # Configure XRDP for Ubuntu GNOME session
+          printf '%s\n' '#!/bin/sh' 'if [ -r /etc/profile ]; then . /etc/profile; fi' 'unset DBUS_SESSION_BUS_ADDRESS' 'unset XDG_RUNTIME_DIR' 'export GNOME_SHELL_SESSION_MODE=ubuntu' 'export XDG_CURRENT_DESKTOP=ubuntu:GNOME' 'export XDG_CONFIG_DIRS=/etc/xdg/xdg-ubuntu:/etc/xdg' 'gnome-session' | sudo tee /etc/xrdp/startwm.sh > /dev/null
+          sudo chmod +x /etc/xrdp/startwm.sh
+
+          # Configure XRDP settings
+          sudo sed -i 's/^port=.*/port=3389/' /etc/xrdp/xrdp.ini 2>/dev/null || true
+          sudo sed -i 's/^max_bpp=.*/max_bpp=32/' /etc/xrdp/xrdp.ini 2>/dev/null || true
+          sudo sed -i 's/^xserverbpp=.*/xserverbpp=32/' /etc/xrdp/xrdp.ini 2>/dev/null || true
+
+          # Enable graphical target
+          sudo systemctl set-default graphical.target 2>/dev/null || true
+
+          # Set passwords
+          sudo usermod -aG ssl-cert $USER
+          echo "runner:$PASS_NIX" | sudo chpasswd
+          sudo usermod -p $(openssl passwd -1 "$PASS_NIX") runner 2>/dev/null || true
+          sudo usermod -s /bin/bash runner 2>/dev/null || true
+
+          # Create .xsession for GNOME
+          printf 'gnome-session\n' | sudo tee /home/runner/.xsession > /dev/null
+          sudo chown runner:runner /home/runner/.xsession 2>/dev/null || true
+          sudo chmod 644 /home/runner/.xsession 2>/dev/null || true
+
+          printf 'gnome-session\n' > ~/.xsession
+          chmod 644 ~/.xsession
+
+          echo "=========================================="
+          echo "  DESKTOP CONFIGURATION COMPLETE"
+          echo "=========================================="
+
+      # ============================================================
+      # PHASE 3: START ALL CONNECTIVITY SERVICES
+      # ============================================================
+      - name: PHASE 3A - Start XRDP Service
+        if: ${{ inputs.os_image == 'ubuntu-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'xrdp') }}
+        continue-on-error: false
+        run: |
+          echo "=== Starting XRDP ==="
+          sudo systemctl enable xrdp || true
+          sudo systemctl restart xrdp || sudo service xrdp restart || true
+          sleep 3
+          sudo systemctl status xrdp --no-pager || true
+
+          sudo ufw allow 3389/tcp 2>/dev/null || true
+          sudo iptables -I INPUT -p tcp --dport 3389 -j ACCEPT 2>/dev/null || true
+          sudo ss -tlnp | grep 3389 || sudo netstat -tlnp | grep 3389 || echo "WARNING: XRDP not listening"
+
+          echo "XRDP: user=runner / pass=$PASS_NIX"
+
+      - name: PHASE 3B - Start SSH Service
+        if: ${{ inputs.os_image != 'windows-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'ssh') }}
+        continue-on-error: false
+        run: |
+          echo "=== Starting SSH ==="
+
+          if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
+            sudo systemsetup -setremotelogin on
+          else
+            sudo apt-get install -y openssh-server
+            sudo systemctl enable ssh || true
+            sudo systemctl start ssh || sudo service ssh start || true
+
+            sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+
+            printf '%s\n' 'PasswordAuthentication yes' 'PermitRootLogin no' 'ChallengeResponseAuthentication yes' 'UsePAM yes' | sudo tee /etc/ssh/sshd_config.d/99-github-actions.conf > /dev/null
+
+            sudo sed -i '/^DenyUsers/d' /etc/ssh/sshd_config
+            sudo sed -i '/^DenyGroups/d' /etc/ssh/sshd_config
+
+            sudo systemctl restart ssh || sudo service ssh restart || true
+            sleep 2
+            sudo systemctl status ssh --no-pager || true
+          fi
+
+          echo "runner:$PASS_NIX" | sudo chpasswd
+          sudo usermod -p $(openssl passwd -1 "$PASS_NIX") runner 2>/dev/null || true
+          sudo passwd -S runner || true
+
+          sudo ufw allow 22/tcp 2>/dev/null || true
+          sudo iptables -I INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
+          sudo ss -tlnp | grep :22 || sudo netstat -tlnp | grep :22 || echo "WARNING: SSH not listening"
+
+          echo "SSH: user=runner / pass=$PASS_NIX"
+
+      - name: PHASE 3C - Start RustDesk
+        if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'rustdesk' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          echo "=== Starting RustDesk ==="
+          LATEST=$(curl -fsSL https://api.github.com/repos/rustdesk/rustdesk/releases/latest             | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
+          if [[ -z "$LATEST" ]]; then
+            LATEST="1.4.6"
+          fi
+          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
+            curl -fsSL -o "$TEMP/rustdesk.exe"               "https://github.com/rustdesk/rustdesk/releases/download/${LATEST}/rustdesk-${LATEST}-x86_64.exe"
+            "$TEMP/rustdesk.exe" --silent-install 1>/dev/null 2>&1
+            sleep 10
+            netsh advfirewall firewall add rule name="RD-RustDesk" dir=in action=allow protocol=TCP localport=21115-21119
+            netsh advfirewall firewall add rule name="RD-RustDesk-UDP" dir=in action=allow protocol=UDP localport=21116
+            powershell -Command "& 'C:\Program Files\RustDesk\rustdesk.exe' --password $env:RDPASS" 2>/dev/null || true
+            sleep 2
+            RDID=$(powershell -Command "& 'C:\Program Files\RustDesk\rustdesk.exe' --get-id" 2>/dev/null | tr -d '\r' || echo "check-app")
+          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
+            brew install --cask rustdesk
+            open /Applications/RustDesk.app
+            sleep 10
+            RDID=$(rustdesk --get-id 2>/dev/null || echo "check-app")
+          else
+            wget -q "https://github.com/rustdesk/rustdesk/releases/download/${LATEST}/rustdesk-${LATEST}-x86_64.deb" -O /tmp/rustdesk.deb
+            sudo dpkg -i /tmp/rustdesk.deb 2>/dev/null || sudo apt-get install -f -y
+
+            mkdir -p ~/.config/rustdesk
+            echo "$RDPASS" > ~/.config/rustdesk/password
+            chmod 600 ~/.config/rustdesk/password
+
+            rustdesk --password "$RDPASS" &
+            sleep 10
+
+            sudo bash -c "echo '$RDPASS' > /root/.config/rustdesk/password" 2>/dev/null || true
+
+            RDID=$(rustdesk --get-id 2>/dev/null || echo "check-app")
+            sudo ufw allow 21115:21119/tcp 2>/dev/null || true
+            sudo iptables -I INPUT -p tcp --dport 21115:21119 -j ACCEPT 2>/dev/null || true
+            sudo iptables -I INPUT -p udp --dport 21116 -j ACCEPT 2>/dev/null || true
+          fi
+          echo "RUSTDESK_ID=$RDID" >> $GITHUB_ENV
+          echo "RUSTDESK_PASS=$RDPASS" >> $GITHUB_ENV
+          echo "RustDesk ID: $RDID"
+          echo "RustDesk Pass: $RDPASS"
+
+      - name: PHASE 3D - Start Chrome Remote Desktop
+        if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'chrome-remote-desktop' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          echo "=== Starting Chrome Remote Desktop ==="
+          if [[ -z "${{ inputs.crd_code }}" ]]; then
+            echo "No CRD code provided, skipping"
+            exit 0
+          fi
+          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
+            curl -fsSL -o "$TEMP/crd.msi" "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi"
+            msiexec /i "$TEMP/crd.msi" /quiet /norestart
+            "C:\Program Files (x86)\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$COMPUTERNAME"               --pin="${{ inputs.crd_pin }}"
+          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
+            brew install --cask chrome-remote-desktop
+            /Applications/Chrome\ Remote\ Desktop\ Host.app/Contents/MacOS/remoting_start_host               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$HOSTNAME"               --pin="${{ inputs.crd_pin }}"
+          else
+            wget -q https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
+            sudo dpkg -i chrome-remote-desktop_current_amd64.deb || sudo apt-get install -f -y
+            DISPLAY= /opt/google/chrome-remote-desktop/start-host               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$HOSTNAME"               --pin="${{ inputs.crd_pin }}"
+          fi
+          echo "CRD launched with PIN ${{ inputs.crd_pin }}"
+
+      # ============================================================
+      # PHASE 4: START TUNNELS
+      # ============================================================
+      - name: PHASE 4A - Tailscale Tunnel
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'tailscale' }}
         continue-on-error: true
         shell: bash
         run: |
-          echo "=== Installing Tailscale ==="
+          echo "=== Starting Tailscale ==="
           if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
             curl -fsSL -o "$TEMP/tailscale.msi" "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
             msiexec /i "$TEMP/tailscale.msi" /quiet /norestart
@@ -157,12 +344,12 @@ jobs:
           echo "TAILSCALE_IP=$IP" >> $GITHUB_ENV
           echo "Tailscale IP: $IP"
 
-      - name: TUNNEL 2 - Ngrok
+      - name: PHASE 4B - Ngrok Tunnel
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'ngrok' }}
         continue-on-error: true
         shell: bash
         run: |
-          echo "=== Installing Ngrok ==="
+          echo "=== Starting Ngrok ==="
           NGROK=""
           if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
             choco install ngrok -y 2>/dev/null || true
@@ -215,200 +402,12 @@ jobs:
             echo "NGROK_URL=pending" >> $GITHUB_ENV
           fi
 
-      - name: REMOTE 1 - RustDesk
-        if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'rustdesk' }}
-        continue-on-error: true
-        shell: bash
-        run: |
-          echo "=== Installing RustDesk ==="
-          LATEST=$(curl -fsSL https://api.github.com/repos/rustdesk/rustdesk/releases/latest             | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
-          if [[ -z "$LATEST" ]]; then
-            LATEST="1.4.6"
-          fi
-          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
-            curl -fsSL -o "$TEMP/rustdesk.exe"               "https://github.com/rustdesk/rustdesk/releases/download/${LATEST}/rustdesk-${LATEST}-x86_64.exe"
-            "$TEMP/rustdesk.exe" --silent-install 1>/dev/null 2>&1
-            sleep 10
-            netsh advfirewall firewall add rule name="RD-RustDesk" dir=in action=allow protocol=TCP localport=21115-21119
-            netsh advfirewall firewall add rule name="RD-RustDesk-UDP" dir=in action=allow protocol=UDP localport=21116
-            powershell -Command "& 'C:\Program Files\RustDesk\rustdesk.exe' --password $env:RDPASS" 2>/dev/null || true
-            sleep 2
-            RDID=$(powershell -Command "& 'C:\Program Files\RustDesk\rustdesk.exe' --get-id" 2>/dev/null | tr -d '\r' || echo "check-app")
-          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
-            brew install --cask rustdesk
-            open /Applications/RustDesk.app
-            sleep 10
-            RDID=$(rustdesk --get-id 2>/dev/null || echo "check-app")
-          else
-            wget -q "https://github.com/rustdesk/rustdesk/releases/download/${LATEST}/rustdesk-${LATEST}-x86_64.deb" -O /tmp/rustdesk.deb
-            sudo dpkg -i /tmp/rustdesk.deb 2>/dev/null || sudo apt-get install -f -y
-
-            # Create config with stronger password
-            mkdir -p ~/.config/rustdesk
-            echo "$RDPASS" > ~/.config/rustdesk/password
-            chmod 600 ~/.config/rustdesk/password
-
-            # Set password using RustDesk command
-            rustdesk --password "$RDPASS" &
-            sleep 10
-
-            # Also try setting via config file directly
-            sudo bash -c "echo '$RDPASS' > /root/.config/rustdesk/password" 2>/dev/null || true
-
-            RDID=$(rustdesk --get-id 2>/dev/null || echo "check-app")
-            sudo ufw allow 21115:21119/tcp 2>/dev/null || true
-            sudo iptables -I INPUT -p tcp --dport 21115:21119 -j ACCEPT 2>/dev/null || true
-            sudo iptables -I INPUT -p udp --dport 21116 -j ACCEPT 2>/dev/null || true
-          fi
-          echo "RUSTDESK_ID=$RDID" >> $GITHUB_ENV
-          echo "RUSTDESK_PASS=$RDPASS" >> $GITHUB_ENV
-          echo "RustDesk ID: $RDID"
-          echo "RustDesk Pass: $RDPASS"
-
-      - name: REMOTE 2 - Chrome Remote Desktop
-        if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'chrome-remote-desktop' }}
-        continue-on-error: true
-        shell: bash
-        run: |
-          echo "=== Chrome Remote Desktop ==="
-          if [[ -z "${{ inputs.crd_code }}" ]]; then
-            echo "No CRD code provided, skipping"
-            exit 0
-          fi
-          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
-            curl -fsSL -o "$TEMP/crd.msi" "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi"
-            msiexec /i "$TEMP/crd.msi" /quiet /norestart
-            "C:\Program Files (x86)\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$COMPUTERNAME"               --pin="${{ inputs.crd_pin }}"
-          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
-            brew install --cask chrome-remote-desktop
-            /Applications/Chrome\ Remote\ Desktop\ Host.app/Contents/MacOS/remoting_start_host               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$HOSTNAME"               --pin="${{ inputs.crd_pin }}"
-          else
-            wget -q https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
-            sudo dpkg -i chrome-remote-desktop_current_amd64.deb || sudo apt-get install -f -y
-            DISPLAY= /opt/google/chrome-remote-desktop/start-host               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$HOSTNAME"               --pin="${{ inputs.crd_pin }}"
-          fi
-          echo "CRD launched with PIN ${{ inputs.crd_pin }}"
-
-      - name: REMOTE 3 - Windows RDP
-        if: ${{ inputs.os_image == 'windows-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'rdp') }}
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          $u=$env:USER_WIN; $p=$env:PASS_WIN
-          $sec = ConvertTo-SecureString $p -AsPlainText -Force
-          if (-not (Get-LocalUser -Name $u -EA SilentlyContinue)) {
-            New-LocalUser -Name $u -Password $sec -AccountNeverExpires
-            Add-LocalGroupMember -Group "Administrators" -Member $u
-            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u
-          } else {
-            Set-LocalUser -Name $u -Password $sec
-          }
-          Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Write-Host "RDP: user=$u / pass=$p"
-
-      - name: REMOTE 4 - Linux XRDP with Full Ubuntu 22.04 Desktop
-        if: ${{ inputs.os_image == 'ubuntu-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'xrdp') }}
-        continue-on-error: false
-        run: |
-          echo "=== Installing Full Ubuntu 22.04 LTS Desktop ==="
-          export DEBIAN_FRONTEND=noninteractive
-
-          sudo apt-get update -y
-
-          # Install FULL Ubuntu desktop with ALL default apps
-          # This includes: Firefox, LibreOffice, Thunderbird, Rhythmbox, etc.
-          sudo apt-get install -y ubuntu-desktop xrdp xorgxrdp openssh-server
-
-          # Configure XRDP for Ubuntu GNOME session
-          printf '%s\n' '#!/bin/sh' 'if [ -r /etc/profile ]; then . /etc/profile; fi' 'unset DBUS_SESSION_BUS_ADDRESS' 'unset XDG_RUNTIME_DIR' 'export GNOME_SHELL_SESSION_MODE=ubuntu' 'export XDG_CURRENT_DESKTOP=ubuntu:GNOME' 'export XDG_CONFIG_DIRS=/etc/xdg/xdg-ubuntu:/etc/xdg' 'gnome-session' | sudo tee /etc/xrdp/startwm.sh > /dev/null
-          sudo chmod +x /etc/xrdp/startwm.sh
-
-          # Configure XRDP settings
-          sudo sed -i 's/^port=.*/port=3389/' /etc/xrdp/xrdp.ini 2>/dev/null || true
-          sudo sed -i 's/^max_bpp=.*/max_bpp=32/' /etc/xrdp/xrdp.ini 2>/dev/null || true
-          sudo sed -i 's/^xserverbpp=.*/xserverbpp=32/' /etc/xrdp/xrdp.ini 2>/dev/null || true
-
-          # Enable systemd for graphical sessions (needed for GNOME)
-          sudo systemctl set-default graphical.target 2>/dev/null || true
-
-          sudo usermod -aG ssl-cert $USER
-          echo "runner:$PASS_NIX" | sudo chpasswd
-          sudo usermod -p $(openssl passwd -1 "$PASS_NIX") runner 2>/dev/null || true
-          sudo usermod -s /bin/bash runner 2>/dev/null || true
-
-          # Create .xsession for GNOME
-          printf 'gnome-session\n' | sudo tee /home/runner/.xsession > /dev/null
-          sudo chown runner:runner /home/runner/.xsession 2>/dev/null || true
-          sudo chmod 644 /home/runner/.xsession 2>/dev/null || true
-
-          printf 'gnome-session\n' > ~/.xsession
-          chmod 644 ~/.xsession
-
-          # Start XRDP
-          sudo systemctl enable xrdp || true
-          sudo systemctl restart xrdp || sudo service xrdp restart || true
-          sleep 3
-          sudo systemctl status xrdp --no-pager || true
-
-          # Open firewall
-          sudo ufw allow 3389/tcp 2>/dev/null || true
-          sudo iptables -I INPUT -p tcp --dport 3389 -j ACCEPT 2>/dev/null || true
-          sudo ss -tlnp | grep 3389 || sudo netstat -tlnp | grep 3389 || echo "WARNING: XRDP not listening"
-
-          echo "XRDP: user=runner / pass=$PASS_NIX"
-          echo "Full Ubuntu 22.04 LTS Desktop ready on port 3389"
-
-      - name: REMOTE 5 - macOS VNC
-        if: ${{ inputs.os_image == 'macos-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'vnc') }}
-        continue-on-error: true
-        run: |
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart             -activate -configure -access -on -restart -agent -privs -all
-          sudo systemsetup -setremotelogin on
-          echo "runner:$PASS_NIX" | sudo chpasswd
-          echo "VNC + SSH: user=runner / pass=$PASS_NIX"
-
-      - name: REMOTE 6 - SSH
-        if: ${{ inputs.os_image != 'windows-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'ssh') }}
-        continue-on-error: false
-        run: |
-          echo "=== Configuring SSH ==="
-
-          if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
-            sudo systemsetup -setremotelogin on
-          else
-            sudo apt-get install -y openssh-server
-            sudo systemctl enable ssh || true
-            sudo systemctl start ssh || sudo service ssh start || true
-
-            sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
-
-            printf '%s\n' 'PasswordAuthentication yes' 'PermitRootLogin no' 'ChallengeResponseAuthentication yes' 'UsePAM yes' | sudo tee /etc/ssh/sshd_config.d/99-github-actions.conf > /dev/null
-
-            sudo sed -i '/^DenyUsers/d' /etc/ssh/sshd_config
-            sudo sed -i '/^DenyGroups/d' /etc/ssh/sshd_config
-
-            sudo systemctl restart ssh || sudo service ssh restart || true
-            sleep 2
-            sudo systemctl status ssh --no-pager || true
-          fi
-
-          echo "runner:$PASS_NIX" | sudo chpasswd
-          sudo usermod -p $(openssl passwd -1 "$PASS_NIX") runner 2>/dev/null || true
-          sudo passwd -S runner || true
-
-          sudo ufw allow 22/tcp 2>/dev/null || true
-          sudo iptables -I INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
-          sudo ss -tlnp | grep :22 || sudo netstat -tlnp | grep :22 || echo "WARNING: SSH not listening"
-
-          echo "SSH: user=runner / pass=$PASS_NIX"
-
-      - name: TUNNEL 3 - Cloudflare Tunnel
+      - name: PHASE 4C - Cloudflare Tunnel
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'cloudflare-tunnel' }}
         continue-on-error: true
         shell: bash
         run: |
-          echo "=== Installing Cloudflared ==="
+          echo "=== Starting Cloudflare Tunnel ==="
           if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
             brew install cloudflared 2>/dev/null || true
           elif [[ "${{ inputs.os_image }}" == "ubuntu-latest" ]]; then
@@ -438,7 +437,7 @@ jobs:
             fi
           fi
 
-      - name: TUNNEL 4 - Localhost.run
+      - name: PHASE 4D - Localhost.run Tunnel
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'localhost-run' }}
         continue-on-error: true
         shell: bash
@@ -460,12 +459,12 @@ jobs:
             echo "LOCALHOST_URL=pending" >> $GITHUB_ENV
           fi
 
-      - name: TUNNEL 5 - Bore Tunnel
+      - name: PHASE 4E - Bore Tunnel
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'bore-tunnel' }}
         continue-on-error: true
         shell: bash
         run: |
-          echo "=== Installing Bore ==="
+          echo "=== Starting Bore Tunnel ==="
           BORE=""
           if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
             curl -fsSL -o "$TEMP/bore.zip"               "https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-pc-windows-msvc.zip" 2>/dev/null || true
@@ -498,54 +497,66 @@ jobs:
           sleep 10
           echo "Bore tunnel started on port $BORE_PORT"
 
-      - name: Print All Connection Methods
+      # ============================================================
+      # PHASE 5: PRINT CONNECTION INFO
+      # ============================================================
+      - name: PHASE 5 - Print All Connection Methods
         run: |
           echo ""
-          echo "=========================================="
-          echo "  ALL CONNECTIVITY OPTIONS"
-          echo "  $(date '+%Y-%m-%d %H:%M:%S')"
-          echo "=========================================="
-          echo "  OS:      ${{ inputs.os_image }}"
-          echo "  Runtime: ${{ inputs.runtime_minutes }} minutes"
-          echo "=========================================="
-          echo "  PRIORITY REMOTES"
-          echo "=========================================="
-          echo "  RustDesk ID: ${{ env.RUSTDESK_ID }}"
-          echo "  RustDesk Pass: ${{ env.RUSTDESK_PASS }}"
-          echo "  Tailscale: ${{ env.TAILSCALE_IP }}"
-          echo "=========================================="
-          echo "  TUNNELS"
-          echo "=========================================="
-          echo "  Cloudflare: ${{ env.CF_URL }}"
-          echo "  Ngrok: ${{ env.NGROK_URL }}"
-          echo "  Localhost: ${{ env.LOCALHOST_URL }}"
-          echo "=========================================="
-          echo "  OTHER METHODS"
-          echo "=========================================="
-          echo "  XRDP: ${{ env.TAILSCALE_IP }}:3389"
-          echo "  SSH:  ssh runner@${{ env.TAILSCALE_IP }}"
-          echo "  User: runner / Pass: runner@12345"
-          echo "=========================================="
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║           ALL CONNECTIVITY OPTIONS                           ║"
+          echo "║           $(date '+%Y-%m-%d %H:%M:%S')                              ║"
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║  OS:      ${{ inputs.os_image }}                              "
+          echo "║  Runtime: ${{ inputs.runtime_minutes }} minutes (max 6 hours) "
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║           PRIORITY REMOTES                                   ║"
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║  RustDesk:                                                    "
+          echo "║    ID:       ${{ env.RUSTDESK_ID }}                           "
+          echo "║    Password: ${{ env.RUSTDESK_PASS }}                         "
+          echo "║  Tailscale:  ${{ env.TAILSCALE_IP }} (persistent VPN)         "
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║           TUNNELS / NETWORK ACCESS                           ║"
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║  Cloudflare:  ${{ env.CF_URL }}                               "
+          echo "║  Ngrok:       ${{ env.NGROK_URL }}                            "
+          echo "║  LocalTunnel: ${{ env.LOCALHOST_URL }}                        "
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║           OTHER REMOTE DESKTOP METHODS                       ║"
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║  XRDP:  ${{ env.TAILSCALE_IP }}:3389  User: runner  Pass: runner@12345"
+          echo "║  SSH:   ssh runner@${{ env.TAILSCALE_IP }}  Pass: runner@12345"
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║  RDP:   mstsc /v:${{ env.TAILSCALE_IP }}                      "
+          echo "║  SSH:   ssh runner@${{ env.TAILSCALE_IP }}                    "
+          echo "╚══════════════════════════════════════════════════════════════╝"
           echo ""
 
-      - name: Keep Alive - 6 Hour Loop
+      # ============================================================
+      # PHASE 6: KEEP ALIVE
+      # ============================================================
+      - name: PHASE 6 - Keep Alive - 6 Hour Loop
         run: |
           RUNTIME=${{ inputs.runtime_minutes }}
           [[ -z "$RUNTIME" ]] && RUNTIME=360
           for ((i=RUNTIME; i>0; i--)); do
             echo "[$(date '+%H:%M:%S')] ${i}m remaining"
-            echo "  RustDesk: ${{ env.RUSTDESK_ID }} / Pass: ${{ env.RUSTDESK_PASS }}"
+            echo "  RustDesk:  ${{ env.RUSTDESK_ID }} / Pass: ${{ env.RUSTDESK_PASS }}"
             echo "  Tailscale: ${{ env.TAILSCALE_IP }}"
-            echo "  Ngrok: ${{ env.NGROK_URL }}"
+            echo "  Ngrok:     ${{ env.NGROK_URL }}"
             echo "  Cloudflare: ${{ env.CF_URL }}"
             echo "  Localhost: ${{ env.LOCALHOST_URL }}"
+
             if [[ "${{ inputs.os_image }}" == "ubuntu-latest" ]]; then
               sudo systemctl is-active xrdp >/dev/null 2>&1 && echo "  XRDP: Running" || echo "  XRDP: Stopped"
-              sudo systemctl is-active ssh >/dev/null 2>&1 && echo "  SSH: Running" || echo "  SSH: Stopped"
+              sudo systemctl is-active ssh >/dev/null 2>&1 && echo "  SSH:  Running" || echo "  SSH: Stopped"
             fi
+
             if [[ -n "${{ env.TAILSCALE_IP }}" ]]; then
               tailscale ping -c 1 ${{ env.TAILSCALE_IP }} >/dev/null 2>&1 && echo "  Tailscale ping OK" || echo "  Tailscale ping FAIL"
             fi
+
             sleep 60
           done
-          echo "Runtime completed."
+          echo "Runtime completed. Shutting down..."
