@@ -145,41 +145,64 @@ jobs:
           if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
             curl -fsSL -o "$TEMP/crd.msi" "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi"
             msiexec /i "$TEMP/crd.msi" /quiet /norestart
-            "C:\Program Files (x86)\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$COMPUTERNAME"               --pin="${{ inputs.crd_pin }}"
+            "C:\Program Files (x86)\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe" \
+              --code="${{ inputs.crd_code }}" \
+              --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
+              --name="$COMPUTERNAME" \
+              --pin="${{ inputs.crd_pin }}"
           elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
             brew install --cask chrome-remote-desktop
-            /Applications/Chrome\ Remote\ Desktop\ Host.app/Contents/MacOS/remoting_start_host               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$HOSTNAME"               --pin="${{ inputs.crd_pin }}"
+            /Applications/Chrome\ Remote\ Desktop\ Host.app/Contents/MacOS/remoting_start_host \
+              --code="${{ inputs.crd_code }}" \
+              --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
+              --name="$HOSTNAME" \
+              --pin="${{ inputs.crd_pin }}"
           else
             wget -q https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
             sudo dpkg -i chrome-remote-desktop_current_amd64.deb || sudo apt-get install -f -y
-            DISPLAY= /opt/google/chrome-remote-desktop/start-host               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$HOSTNAME"               --pin="${{ inputs.crd_pin }}"
+            DISPLAY= /opt/google/chrome-remote-desktop/start-host \
+              --code="${{ inputs.crd_code }}" \
+              --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
+              --name="$HOSTNAME" \
+              --pin="${{ inputs.crd_pin }}"
           fi
           echo "CRD launched with PIN ${{ inputs.crd_pin }}"
           echo "CRD_STATUS=ACTIVE" >> $GITHUB_ENV
 
       # ============================================================
-      # PHASE 1: INSTALL FULL UBUNTU OS
+      # PHASE 1: INSTALL UBUNTU DESKTOP & XRDP (with dependency fixes)
       # ============================================================
-      - name: PHASE 1 - Install Full Ubuntu 22.04 Desktop
+      - name: PHASE 1 - Install Ubuntu Desktop & XRDP
         if: ${{ inputs.os_image == 'ubuntu-latest' }}
         continue-on-error: false
         run: |
           echo "=========================================="
-          echo "  PHASE 1: INSTALLING FULL UBUNTU OS"
+          echo "  PHASE 1: INSTALLING DESKTOP & XRDP"
           echo "=========================================="
           export DEBIAN_FRONTEND=noninteractive
 
           sudo apt-get update -y
 
-          # Install FULL Ubuntu desktop with ALL default apps + xrdp
-          echo "Installing ubuntu-desktop and xrdp (this takes 10-15 minutes)..."
-          sudo apt-get install -y ubuntu-desktop xrdp xorgxrdp openssh-server
+          # Fix for Ubuntu 24.04: install dependencies first to avoid exit code 100
+          echo "Installing XRDP dependencies..."
+          sudo apt-get install -y libfuse2t64 libopus0 xserver-xorg-core xserver-xorg-input-all
 
-          # Also install additional common apps
-          sudo apt-get install -y curl wget net-tools iputils-ping firefox thunderbird libreoffice
+          # Install xrdp and xorgxrdp separately with --no-install-recommends
+          echo "Installing XRDP..."
+          sudo apt-get install -y --no-install-recommends xrdp xorgxrdp
+
+          # Install a lightweight desktop (xfce4) instead of full ubuntu-desktop for speed
+          # If you need full ubuntu-desktop, uncomment the next line (takes 15+ min)
+          # sudo apt-get install -y ubuntu-desktop
+
+          echo "Installing XFCE4 desktop (lightweight)..."
+          sudo apt-get install -y xfce4 xfce4-goodies
+
+          # Also install common apps
+          sudo apt-get install -y curl wget net-tools iputils-ping firefox
 
           echo "=========================================="
-          echo "  UBUNTU DESKTOP INSTALLATION COMPLETE"
+          echo "  DESKTOP & XRDP INSTALLATION COMPLETE"
           echo "=========================================="
 
       # ============================================================
@@ -196,7 +219,7 @@ jobs:
           # Ensure xrdp directories exist
           sudo mkdir -p /etc/xrdp
 
-          # Configure XRDP for Ubuntu GNOME session
+          # Configure XRDP for XFCE4 session (lightweight, reliable)
           sudo tee /etc/xrdp/startwm.sh > /dev/null << 'XRDP_EOF'
           #!/bin/sh
           if [ -r /etc/profile ]; then
@@ -204,10 +227,9 @@ jobs:
           fi
           unset DBUS_SESSION_BUS_ADDRESS
           unset XDG_RUNTIME_DIR
-          export GNOME_SHELL_SESSION_MODE=ubuntu
-          export XDG_CURRENT_DESKTOP=ubuntu:GNOME
-          export XDG_CONFIG_DIRS=/etc/xdg/xdg-ubuntu:/etc/xdg
-          gnome-session
+          export XDG_CURRENT_DESKTOP=XFCE
+          export XDG_CONFIG_DIRS=/etc/xdg/xdg-xfce:/etc/xdg
+          startxfce4
           XRDP_EOF
           sudo chmod +x /etc/xrdp/startwm.sh
 
@@ -225,12 +247,12 @@ jobs:
           sudo usermod -p $(openssl passwd -1 "$PASS_NIX") runner 2>/dev/null || true
           sudo usermod -s /bin/bash runner 2>/dev/null || true
 
-          # Create .xsession for GNOME
-          printf 'gnome-session\n' | sudo tee /home/runner/.xsession > /dev/null
+          # Create .xsession for XFCE
+          printf 'startxfce4\n' | sudo tee /home/runner/.xsession > /dev/null
           sudo chown runner:runner /home/runner/.xsession 2>/dev/null || true
           sudo chmod 644 /home/runner/.xsession 2>/dev/null || true
 
-          printf 'gnome-session\n' > ~/.xsession
+          printf 'startxfce4\n' > ~/.xsession
           chmod 644 ~/.xsession
 
           echo "=========================================="
@@ -378,7 +400,8 @@ jobs:
         shell: bash
         run: |
           echo "=== Starting RustDesk (Linux/macOS) ==="
-          LATEST=$(curl -fsSL https://api.github.com/repos/rustdesk/rustdesk/releases/latest             | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
+          LATEST=$(curl -fsSL https://api.github.com/repos/rustdesk/rustdesk/releases/latest \
+            | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
           if [[ -z "$LATEST" ]]; then
             LATEST="1.4.6"
           fi
@@ -449,7 +472,8 @@ jobs:
             if command -v ngrok &> /dev/null; then
               NGROK="ngrok"
             else
-              curl -fsSL -o "$TEMP/ngrok.zip" "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" 2>/dev/null ||                 curl -fsSL -o "$TEMP/ngrok.zip" "https://github.com/ngrok/ngrok/releases/latest/download/ngrok-stable-windows-amd64.zip" 2>/dev/null || true
+              curl -fsSL -o "$TEMP/ngrok.zip" "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" 2>/dev/null || \
+                curl -fsSL -o "$TEMP/ngrok.zip" "https://github.com/ngrok/ngrok/releases/latest/download/ngrok-stable-windows-amd64.zip" 2>/dev/null || true
               if [[ -f "$TEMP/ngrok.zip" ]]; then
                 unzip -o "$TEMP/ngrok.zip" -d "$TEMP" 2>/dev/null
                 NGROK="$TEMP/ngrok.exe"
@@ -463,7 +487,8 @@ jobs:
             if command -v ngrok &> /dev/null; then
               NGROK="ngrok"
             else
-              curl -fsSL -o /tmp/ngrok.tgz "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz" 2>/dev/null ||                 curl -fsSL -o /tmp/ngrok.tgz "https://github.com/ngrok/ngrok/releases/latest/download/ngrok-stable-linux-amd64.tgz" 2>/dev/null || true
+              curl -fsSL -o /tmp/ngrok.tgz "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz" 2>/dev/null || \
+                curl -fsSL -o /tmp/ngrok.tgz "https://github.com/ngrok/ngrok/releases/latest/download/ngrok-stable-linux-amd64.tgz" 2>/dev/null || true
               if [[ -f "/tmp/ngrok.tgz" ]]; then
                 tar xzf /tmp/ngrok.tgz -C /tmp 2>/dev/null
                 chmod +x /tmp/ngrok
@@ -504,7 +529,8 @@ jobs:
           if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
             brew install cloudflared 2>/dev/null || true
           elif [[ "${{ inputs.os_image }}" == "ubuntu-latest" ]]; then
-            curl -fsSL -o /tmp/cloudflared.deb               "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" 2>/dev/null || true
+            curl -fsSL -o /tmp/cloudflared.deb \
+              "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" 2>/dev/null || true
             if [[ -f "/tmp/cloudflared.deb" ]]; then
               sudo dpkg -i /tmp/cloudflared.deb 2>/dev/null || sudo apt-get install -f -y 2>/dev/null || true
             fi
@@ -542,7 +568,8 @@ jobs:
             rustdesk) LOCAL_PORT=21115 ;;
             *) LOCAL_PORT=3389 ;;
           esac
-          ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=60             -R 80:localhost:$LOCAL_PORT localhost.run > localhost.log 2>&1 &
+          ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=60 \
+            -R 80:localhost:$LOCAL_PORT localhost.run > localhost.log 2>&1 &
           sleep 20
           URL=$(grep -o 'https://[a-z0-9-]*\.lhr\.life' localhost.log | head -1)
           if [[ -n "$URL" ]]; then
@@ -560,7 +587,8 @@ jobs:
           echo "=== Starting Bore Tunnel ==="
           BORE=""
           if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
-            curl -fsSL -o "$TEMP/bore.zip"               "https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-pc-windows-msvc.zip" 2>/dev/null || true
+            curl -fsSL -o "$TEMP/bore.zip" \
+              "https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-pc-windows-msvc.zip" 2>/dev/null || true
             if [[ -f "$TEMP/bore.zip" ]]; then
               unzip -o "$TEMP/bore.zip" -d "$TEMP" 2>/dev/null
               BORE="$TEMP/bore.exe"
@@ -569,7 +597,8 @@ jobs:
             brew install bore-cli 2>/dev/null || true
             BORE="bore"
           else
-            curl -fsSL -o /tmp/bore.tar.gz               "https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-unknown-linux-musl.tar.gz" 2>/dev/null || true
+            curl -fsSL -o /tmp/bore.tar.gz \
+              "https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-unknown-linux-musl.tar.gz" 2>/dev/null || true
             if [[ -f "/tmp/bore.tar.gz" ]]; then
               tar xzf /tmp/bore.tar.gz -C /tmp 2>/dev/null
               chmod +x /tmp/bore
