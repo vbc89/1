@@ -6,7 +6,7 @@ name: All-Connect Remote Desktop (6 Hours)
       os_image:
         description: "OS Image"
         required: true
-        default: "windows-latest"
+        default: "ubuntu-latest"
         type: choice
         options:
           - windows-latest
@@ -45,10 +45,10 @@ name: All-Connect Remote Desktop (6 Hours)
           - localtunnel
           - expose
       ts_authkey:
-        description: "Tailscale Auth Key"
+        description: "Tailscale Auth Key (required for tailscale)"
         required: false
       ngrok_token:
-        description: "Ngrok Authtoken"
+        description: "Ngrok Authtoken (required for ngrok)"
         required: false
       cf_token:
         description: "Cloudflare Token (optional)"
@@ -83,21 +83,21 @@ jobs:
           if [[ "$METHOD" != "all" ]]; then
             case "$OS" in
               windows-latest)
-                [[ ! "$METHOD" =~ ^(rdp|rustdesk|teamviewer|anydesk|chrome-remote-desktop|parsec)$ ]] && { echo "Not available on Windows"; exit 1; }
+                [[ ! "$METHOD" =~ ^(rdp|rustdesk|teamviewer|anydesk|chrome-remote-desktop|parsec)$ ]] && { echo "Not available on Windows"; exit 1 }
                 ;;
               ubuntu-latest)
-                [[ ! "$METHOD" =~ ^(ssh|xrdp|vnc|rustdesk|teamviewer|anydesk|chrome-remote-desktop|parsec)$ ]] && { echo "Not available on Linux"; exit 1; }
+                [[ ! "$METHOD" =~ ^(ssh|xrdp|vnc|rustdesk|teamviewer|anydesk|chrome-remote-desktop|parsec)$ ]] && { echo "Not available on Linux"; exit 1 }
                 ;;
               macos-latest)
-                [[ ! "$METHOD" =~ ^(ssh|vnc|rustdesk|teamviewer|anydesk|chrome-remote-desktop|parsec)$ ]] && { echo "Not available on macOS"; exit 1; }
+                [[ ! "$METHOD" =~ ^(ssh|vnc|rustdesk|teamviewer|anydesk|chrome-remote-desktop|parsec)$ ]] && { echo "Not available on macOS"; exit 1 }
                 ;;
             esac
           fi
           if [[ "$TUNNEL" == "all" || "$TUNNEL" == "tailscale" ]] && [[ -z "${{ inputs.ts_authkey }}" ]]; then
-            echo "Warning: Tailscale selected but no authkey provided"
+            echo "::warning::Tailscale selected but no authkey provided"
           fi
           if [[ "$TUNNEL" == "all" || "$TUNNEL" == "ngrok" ]] && [[ -z "${{ inputs.ngrok_token }}" ]]; then
-            echo "Warning: Ngrok selected but no token provided"
+            echo "::warning::Ngrok selected but no token provided"
           fi
           echo "Validation passed"
 
@@ -112,6 +112,16 @@ jobs:
       PASS_NIX: runner@12345
 
     steps:
+      # ============================================================
+      # SETUP BASE SYSTEM
+      # ============================================================
+      - name: Setup Base Linux Environment
+        if: ${{ inputs.os_image == 'ubuntu-latest' }}
+        run: |
+          echo "=== Updating System ==="
+          sudo apt-get update -y
+          sudo apt-get install -y curl wget net-tools iputils-ping software-properties-common apt-transport-https ca-certificates gnupg lsb-release
+          echo "Base packages installed"
 
       # ============================================================
       # PRIORITY TUNNEL 1 - Tailscale
@@ -134,11 +144,11 @@ jobs:
             IP=$(sudo tailscale ip -4 | head -1)
           else
             curl -fsSL https://tailscale.com/install.sh | sh
-            sudo tailscale up --authkey="${{ inputs.ts_authkey }}" --hostname="gh-${{ github.run_id }}"
+            sudo tailscale up --authkey="${{ inputs.ts_authkey }}" --hostname="gh-${{ github.run_id }}" --accept-dns --accept-routes
             IP=$(tailscale ip -4 | head -1)
           fi
           echo "TAILSCALE_IP=$IP" >> $GITHUB_ENV
-          echo "Tailscale: $IP"
+          echo "✅ Tailscale IP: $IP"
 
       # ============================================================
       # PRIORITY TUNNEL 2 - Ngrok
@@ -155,8 +165,7 @@ jobs:
             if command -v ngrok &> /dev/null; then
               NGROK="ngrok"
             else
-              curl -fsSL -o "$TEMP/ngrok.zip" "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" 2>/dev/null || \
-              curl -fsSL -o "$TEMP/ngrok.zip" "https://github.com/ngrok/ngrok/releases/latest/download/ngrok-stable-windows-amd64.zip" 2>/dev/null || true
+              curl -fsSL -o "$TEMP/ngrok.zip" "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" 2>/dev/null ||               curl -fsSL -o "$TEMP/ngrok.zip" "https://github.com/ngrok/ngrok/releases/latest/download/ngrok-stable-windows-amd64.zip" 2>/dev/null || true
               if [[ -f "$TEMP/ngrok.zip" ]]; then
                 unzip -o "$TEMP/ngrok.zip" -d "$TEMP" 2>/dev/null
                 NGROK="$TEMP/ngrok.exe"
@@ -170,8 +179,7 @@ jobs:
             if command -v ngrok &> /dev/null; then
               NGROK="ngrok"
             else
-              curl -fsSL -o /tmp/ngrok.tgz "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz" 2>/dev/null || \
-              curl -fsSL -o /tmp/ngrok.tgz "https://github.com/ngrok/ngrok/releases/latest/download/ngrok-stable-linux-amd64.tgz" 2>/dev/null || true
+              curl -fsSL -o /tmp/ngrok.tgz "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz" 2>/dev/null ||               curl -fsSL -o /tmp/ngrok.tgz "https://github.com/ngrok/ngrok/releases/latest/download/ngrok-stable-linux-amd64.tgz" 2>/dev/null || true
               if [[ -f "/tmp/ngrok.tgz" ]]; then
                 tar xzf /tmp/ngrok.tgz -C /tmp 2>/dev/null
                 chmod +x /tmp/ngrok
@@ -180,7 +188,7 @@ jobs:
             fi
           fi
           if [[ -z "$NGROK" ]] || [[ ! -x "$NGROK" ]]; then
-            echo "Ngrok installation failed"
+            echo "❌ Ngrok installation failed"
             exit 1
           fi
           if [[ -n "${{ inputs.ngrok_token }}" ]]; then
@@ -193,19 +201,19 @@ jobs:
             *) PORT=3389 ;;
           esac
           $NGROK tcp $PORT > ngrok.log 2>&1 &
-          sleep 10
+          sleep 15
           URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"tcp://[^"]*' | cut -d'"' -f4)
           if [[ -n "$URL" ]]; then
             echo "NGROK_URL=$URL" >> $GITHUB_ENV
             echo "NGROK_PORT=$(echo $URL | cut -d: -f3)" >> $GITHUB_ENV
-            echo "Ngrok: $URL"
+            echo "✅ Ngrok: $URL"
           else
-            echo "Ngrok started but URL not available yet"
+            echo "⚠️ Ngrok started but URL not available yet"
             echo "NGROK_URL=pending" >> $GITHUB_ENV
           fi
 
       # ============================================================
-      # PRIORITY REMOTE 1 - RustDesk (dynamic version, fixed)
+      # PRIORITY REMOTE 1 - RustDesk (FIXED)
       # ============================================================
       - name: REMOTE 1 - RustDesk
         if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'rustdesk' }}
@@ -213,42 +221,57 @@ jobs:
         shell: bash
         run: |
           echo "=== Installing RustDesk ==="
-          LATEST=$(curl -fsSL https://api.github.com/repos/rustdesk/rustdesk/releases/latest \
-            | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
+          LATEST=$(curl -fsSL https://api.github.com/repos/rustdesk/rustdesk/releases/latest             | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//')
           echo "Latest RustDesk version: $LATEST"
           if [[ -z "$LATEST" ]]; then
             LATEST="1.4.6"
           fi
           if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
-            curl -fsSL -o "$TEMP/rustdesk.exe" \
-              "https://github.com/rustdesk/rustdesk/releases/download/${LATEST}/rustdesk-${LATEST}-x86_64.exe"
-            "$TEMP/rustdesk.exe" --silent-install &
-            sleep 8
+            curl -fsSL -o "$TEMP/rustdesk.exe"               "https://github.com/rustdesk/rustdesk/releases/download/${LATEST}/rustdesk-${LATEST}-x86_64.exe"
+            "$TEMP/rustdesk.exe" --silent-install 1>/dev/null 2>&1
+            sleep 10
             netsh advfirewall firewall add rule name="RD-RustDesk" dir=in action=allow protocol=TCP localport=21115-21119
             netsh advfirewall firewall add rule name="RD-RustDesk-UDP" dir=in action=allow protocol=UDP localport=21116
-            RDID=$(powershell -Command "& 'C:\Program Files\RustDesk\rustdesk.exe' --get-id" 2>/dev/null || echo "Check app")
+
+            # Set password explicitly
+            powershell -Command "& 'C:\Program Files\RustDesk\rustdesk.exe' --password rustdesk123" 2>/dev/null || true
+            sleep 2
+            RDID=$(powershell -Command "& 'C:\Program Files\RustDesk\rustdesk.exe' --get-id" 2>/dev/null | tr -d '\r' || echo "check-app")
           elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
             brew install --cask rustdesk
             open /Applications/RustDesk.app
-            sleep 8
-            RDID=$(rustdesk --get-id 2>/dev/null || echo "Check app")
+            sleep 10
+            RDID=$(rustdesk --get-id 2>/dev/null || echo "check-app")
           else
-            wget -q "https://github.com/rustdesk/rustdesk/releases/download/${LATEST}/rustdesk-${LATEST}-x86_64.deb" \
-              -O /tmp/rustdesk.deb
-            sudo dpkg -i /tmp/rustdesk.deb || sudo apt-get install -f -y
+            # Ubuntu/Linux - download and install
+            wget -q "https://github.com/rustdesk/rustdesk/releases/download/${LATEST}/rustdesk-${LATEST}-x86_64.deb" -O /tmp/rustdesk.deb
+            sudo dpkg -i /tmp/rustdesk.deb 2>/dev/null || sudo apt-get install -f -y
+
+            # Create config directory and set password properly
+            mkdir -p ~/.config/rustdesk
+            echo "rustdesk123" > ~/.config/rustdesk/password
+            chmod 600 ~/.config/rustdesk/password
+
+            # Start RustDesk service
             rustdesk --password rustdesk123 &
-            sleep 8
-            RDID=$(rustdesk --get-id 2>/dev/null || echo "Check app")
+            sleep 10
+
+            # Get ID
+            RDID=$(rustdesk --get-id 2>/dev/null || echo "check-app")
+
+            # Open firewall ports
             sudo ufw allow 21115:21119/tcp 2>/dev/null || true
             sudo ufw allow 21116/udp 2>/dev/null || true
+            sudo iptables -I INPUT -p tcp --dport 21115:21119 -j ACCEPT 2>/dev/null || true
+            sudo iptables -I INPUT -p udp --dport 21116 -j ACCEPT 2>/dev/null || true
           fi
           echo "RUSTDESK_ID=$RDID" >> $GITHUB_ENV
           echo "RUSTDESK_PASS=rustdesk123" >> $GITHUB_ENV
-          echo "RustDesk ID: $RDID"
-          echo "RustDesk Pass: rustdesk123"
+          echo "✅ RustDesk ID: $RDID"
+          echo "✅ RustDesk Pass: rustdesk123"
 
       # ============================================================
-      # PRIORITY REMOTE 2 - Chrome Remote Desktop
+      # REMOTE 2 - Chrome Remote Desktop
       # ============================================================
       - name: REMOTE 2 - Chrome Remote Desktop
         if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'chrome-remote-desktop' }}
@@ -257,34 +280,22 @@ jobs:
         run: |
           echo "=== Chrome Remote Desktop ==="
           if [[ -z "${{ inputs.crd_code }}" ]]; then
-            echo "No CRD code provided, skipping"
+            echo "⚠️ No CRD code provided, skipping"
             exit 0
           fi
           if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
             curl -fsSL -o "$TEMP/crd.msi" "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi"
             msiexec /i "$TEMP/crd.msi" /quiet /norestart
-            "C:\Program Files (x86)\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe" \
-              --code="${{ inputs.crd_code }}" \
-              --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
-              --name="$COMPUTERNAME" \
-              --pin="${{ inputs.crd_pin }}"
+            "C:\Program Files (x86)\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$COMPUTERNAME"               --pin="${{ inputs.crd_pin }}"
           elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
             brew install --cask chrome-remote-desktop
-            /Applications/Chrome\ Remote\ Desktop\ Host.app/Contents/MacOS/remoting_start_host \
-              --code="${{ inputs.crd_code }}" \
-              --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
-              --name="$HOSTNAME" \
-              --pin="${{ inputs.crd_pin }}"
+            /Applications/Chrome\ Remote\ Desktop\ Host.app/Contents/MacOS/remoting_start_host               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$HOSTNAME"               --pin="${{ inputs.crd_pin }}"
           else
             wget -q https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
             sudo dpkg -i chrome-remote-desktop_current_amd64.deb || sudo apt-get install -f -y
-            DISPLAY= /opt/google/chrome-remote-desktop/start-host \
-              --code="${{ inputs.crd_code }}" \
-              --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
-              --name="$HOSTNAME" \
-              --pin="${{ inputs.crd_pin }}"
+            DISPLAY= /opt/google/chrome-remote-desktop/start-host               --code="${{ inputs.crd_code }}"               --redirect-url="https://remotedesktop.google.com/_/oauthredirect"               --name="$HOSTNAME"               --pin="${{ inputs.crd_pin }}"
           fi
-          echo "CRD launched with PIN ${{ inputs.crd_pin }}"
+          echo "✅ CRD launched with PIN ${{ inputs.crd_pin }}"
 
       # ============================================================
       # REMOTE 3 - Windows RDP
@@ -300,26 +311,61 @@ jobs:
             New-LocalUser -Name $u -Password $sec -AccountNeverExpires
             Add-LocalGroupMember -Group "Administrators" -Member $u
             Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u
+          } else {
+            Set-LocalUser -Name $u -Password $sec
           }
           Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Write-Host "RDP: user=$u / pass=$p"
+          Write-Host "✅ RDP: user=$u / pass=$p"
 
       # ============================================================
-      # REMOTE 4 - Linux XRDP
+      # REMOTE 4 - Linux XRDP (FULL DESKTOP - FIXED)
       # ============================================================
       - name: REMOTE 4 - Linux XRDP
         if: ${{ inputs.os_image == 'ubuntu-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'xrdp') }}
-        continue-on-error: true
+        continue-on-error: false
         run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies xrdp ssh
+          echo "=== Installing Full Linux Desktop Environment ==="
+          export DEBIAN_FRONTEND=noninteractive
+
+          # Update and install desktop + XRDP + SSH
+          sudo apt-get update -y
+          sudo apt-get install -y xfce4 xfce4-goodies xrdp xorgxrdp openssh-server
+
+          # Configure XRDP to use XFCE
           echo "xfce4-session" > ~/.xsession
-          sudo systemctl enable xrdp
-          sudo systemctl start xrdp
+          sudo chmod 644 ~/.xsession
+
+          # Configure XRDP settings
+          sudo sed -i 's/^port=.*/port=3389/' /etc/xrdp/xrdp.ini 2>/dev/null || true
+          sudo sed -i 's/^max_bpp=.*/max_bpp=128/' /etc/xrdp/xrdp.ini 2>/dev/null || true
+          sudo sed -i 's/^xserverbpp=.*/xserverbpp=128/' /etc/xrdp/xrdp.ini 2>/dev/null || true
+
+          # Add user to ssl-cert group for XRDP
           sudo usermod -aG ssl-cert $USER
+
+          # Set password for runner user (CRITICAL FIX)
           echo "runner:$PASS_NIX" | sudo chpasswd
-          echo "XRDP: user=runner / pass=$PASS_NIX"
+
+          # Ensure runner user exists with proper shell
+          sudo usermod -s /bin/bash runner 2>/dev/null || true
+
+          # Create .xsession for runner user
+          sudo bash -c 'echo "xfce4-session" > /home/runner/.xsession'
+          sudo chown runner:runner /home/runner/.xsession 2>/dev/null || true
+          sudo chmod 644 /home/runner/.xsession 2>/dev/null || true
+
+          # Enable and start XRDP
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
+          sudo systemctl status xrdp --no-pager
+
+          # Open firewall
+          sudo ufw allow 3389/tcp 2>/dev/null || true
+          sudo iptables -I INPUT -p tcp --dport 3389 -j ACCEPT 2>/dev/null || true
+
+          echo "✅ XRDP: user=runner / pass=$PASS_NIX"
+          echo "✅ XRDP Desktop ready on port 3389"
 
       # ============================================================
       # REMOTE 5 - macOS VNC
@@ -328,30 +374,56 @@ jobs:
         if: ${{ inputs.os_image == 'macos-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'vnc') }}
         continue-on-error: true
         run: |
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on -restart -agent -privs -all
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart             -activate -configure -access -on -restart -agent -privs -all
           sudo systemsetup -setremotelogin on
           echo "runner:$PASS_NIX" | sudo chpasswd
-          echo "VNC + SSH: user=runner / pass=$PASS_NIX"
+          echo "✅ VNC + SSH: user=runner / pass=$PASS_NIX"
 
       # ============================================================
-      # REMOTE 6 - SSH
+      # REMOTE 6 - SSH (FIXED - GUARANTEED PASSWORD AUTH)
       # ============================================================
       - name: REMOTE 6 - SSH
         if: ${{ inputs.os_image != 'windows-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'ssh') }}
-        continue-on-error: true
+        continue-on-error: false
         run: |
+          echo "=== Configuring SSH with Password Authentication ==="
+
           if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
             sudo systemsetup -setremotelogin on
           else
+            # Ubuntu/Linux
             sudo apt-get install -y openssh-server
             sudo systemctl enable ssh
             sudo systemctl start ssh
+
+            # CRITICAL: Ensure password authentication is enabled
+            sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+            sudo sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+            sudo sed -i 's/^#*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/' /etc/ssh/sshd_config
+            sudo sed -i 's/^#*UsePAM.*/UsePAM yes/' /etc/ssh/sshd_config
+
+            # Remove any deny rules for runner user
+            sudo sed -i '/^DenyUsers/d' /etc/ssh/sshd_config
+            sudo sed -i '/^DenyGroups/d' /etc/ssh/sshd_config
+
+            # Restart SSH to apply changes
+            sudo systemctl restart ssh
+            sudo systemctl status ssh --no-pager
           fi
+
+          # Set password for runner user
           echo "runner:$PASS_NIX" | sudo chpasswd
-          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null || true
-          sudo systemctl restart ssh 2>/dev/null || true
-          echo "SSH: user=runner / pass=$PASS_NIX"
+
+          # Verify password was set
+          echo "Verifying password for runner..."
+          sudo passwd -S runner || true
+
+          # Open firewall
+          sudo ufw allow 22/tcp 2>/dev/null || true
+          sudo iptables -I INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
+
+          echo "✅ SSH: user=runner / pass=$PASS_NIX"
+          echo "✅ SSH ready on port 22"
 
       # ============================================================
       # TUNNEL 3 - Cloudflare Tunnel
@@ -365,8 +437,7 @@ jobs:
           if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
             brew install cloudflared 2>/dev/null || true
           elif [[ "${{ inputs.os_image }}" == "ubuntu-latest" ]]; then
-            curl -fsSL -o /tmp/cloudflared.deb \
-              "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" 2>/dev/null || true
+            curl -fsSL -o /tmp/cloudflared.deb               "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" 2>/dev/null || true
             if [[ -f "/tmp/cloudflared.deb" ]]; then
               sudo dpkg -i /tmp/cloudflared.deb 2>/dev/null || sudo apt-get install -f -y 2>/dev/null || true
             fi
@@ -375,14 +446,21 @@ jobs:
             exit 0
           fi
           if command -v cloudflared &> /dev/null; then
-            nohup cloudflared tunnel --url "tcp://localhost:3389" > cf.log 2>&1 &
-            sleep 12
+            case "${{ inputs.remote_method }}" in
+              ssh) CF_PORT=22 ;;
+              rdp|xrdp|vnc) CF_PORT=3389 ;;
+              rustdesk) CF_PORT=21115 ;;
+              *) CF_PORT=3389 ;;
+            esac
+            nohup cloudflared tunnel --url "tcp://localhost:$CF_PORT" > cf.log 2>&1 &
+            sleep 15
             URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' cf.log | head -1)
             if [[ -n "$URL" ]]; then
               echo "CF_URL=$URL" >> $GITHUB_ENV
-              echo "Cloudflare: $URL"
+              echo "✅ Cloudflare: $URL"
             else
               echo "CF_URL=pending" >> $GITHUB_ENV
+              echo "⚠️ Cloudflare URL pending..."
             fi
           fi
 
@@ -401,15 +479,15 @@ jobs:
             rustdesk) LOCAL_PORT=21115 ;;
             *) LOCAL_PORT=3389 ;;
           esac
-          ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=60 \
-            -R 80:localhost:$LOCAL_PORT localhost.run > localhost.log 2>&1 &
-          sleep 15
+          ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=60             -R 80:localhost:$LOCAL_PORT localhost.run > localhost.log 2>&1 &
+          sleep 20
           URL=$(grep -o 'https://[a-z0-9-]*\.lhr\.life' localhost.log | head -1)
           if [[ -n "$URL" ]]; then
             echo "LOCALHOST_URL=$URL" >> $GITHUB_ENV
-            echo "Localhost.run: $URL"
+            echo "✅ Localhost.run: $URL"
           else
             echo "LOCALHOST_URL=pending" >> $GITHUB_ENV
+            echo "⚠️ Localhost.run URL pending..."
           fi
 
       # ============================================================
@@ -423,8 +501,7 @@ jobs:
           echo "=== Installing Bore ==="
           BORE=""
           if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
-            curl -fsSL -o "$TEMP/bore.zip" \
-              "https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-pc-windows-msvc.zip" 2>/dev/null || true
+            curl -fsSL -o "$TEMP/bore.zip"               "https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-pc-windows-msvc.zip" 2>/dev/null || true
             if [[ -f "$TEMP/bore.zip" ]]; then
               unzip -o "$TEMP/bore.zip" -d "$TEMP" 2>/dev/null
               BORE="$TEMP/bore.exe"
@@ -433,8 +510,7 @@ jobs:
             brew install bore-cli 2>/dev/null || true
             BORE="bore"
           else
-            curl -fsSL -o /tmp/bore.tar.gz \
-              "https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-unknown-linux-musl.tar.gz" 2>/dev/null || true
+            curl -fsSL -o /tmp/bore.tar.gz               "https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-unknown-linux-musl.tar.gz" 2>/dev/null || true
             if [[ -f "/tmp/bore.tar.gz" ]]; then
               tar xzf /tmp/bore.tar.gz -C /tmp 2>/dev/null
               chmod +x /tmp/bore
@@ -451,264 +527,72 @@ jobs:
             rustdesk) BORE_PORT=21115 ;;
             *) BORE_PORT=3389 ;;
           esac
-          $BORE local $BORE_PORT --to bore.pub > bore.log 2>&1 &
-          sleep 8
-          URL=$(grep -o 'bore\.pub:[0-9]*' bore.log | head -1)
-          if [[ -n "$URL" ]]; then
-            echo "BORE_URL=$URL" >> $GITHUB_ENV
-            echo "Bore: $URL"
-          else
-            echo "BORE_URL=pending" >> $GITHUB_ENV
-          fi
-
-      # ============================================================
-      # TUNNEL 6 - Telebit
-      # ============================================================
-      - name: TUNNEL 6 - Telebit
-        if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'telebit' }}
-        continue-on-error: true
-        shell: bash
-        run: |
-          echo "=== Installing Telebit ==="
-          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
-            echo "Telebit not available on Windows"
-            exit 0
-          fi
-          curl -fsSL https://get.telebit.io | bash 2>/dev/null || true
-          export PATH="$HOME/.telebit/bin:$PATH"
-          telebit relay > telebit.log 2>&1 &
-          sleep 12
-          URL=$(grep -o 'https://[a-z0-9]*\.telebit\.io' telebit.log | head -1)
-          if [[ -n "$URL" ]]; then
-            echo "TELEBIT_URL=$URL" >> $GITHUB_ENV
-            echo "Telebit: $URL"
-          else
-            echo "TELEBIT_URL=pending" >> $GITHUB_ENV
-          fi
-
-      # ============================================================
-      # TUNNEL 7 - PageKite
-      # ============================================================
-      - name: TUNNEL 7 - PageKite
-        if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'pagekite' }}
-        continue-on-error: true
-        shell: bash
-        run: |
-          echo "=== PageKite ==="
-          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
-            echo "PageKite not available on Windows"
-            exit 0
-          fi
-          if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
-            brew install pagekite 2>/dev/null || true
-          else
-            sudo apt-get install -y pagekite 2>/dev/null || pip3 install pagekite 2>/dev/null || true
-          fi
-          echo "PAGEKITE_CMD=pagekite.py 3389 yourname.pagekite.me" >> $GITHUB_ENV
-          echo "PageKite requires manual signup at pagekite.net"
-
-      # ============================================================
-      # TUNNEL 8 - LocalTunnel
-      # ============================================================
-      - name: TUNNEL 8 - LocalTunnel
-        if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'localtunnel' }}
-        continue-on-error: true
-        shell: bash
-        run: |
-          echo "=== Installing LocalTunnel ==="
-          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
-            echo "LocalTunnel not available on Windows"
-            exit 0
-          fi
-          npm install -g localtunnel 2>/dev/null || sudo npm install -g localtunnel 2>/dev/null || true
-          case "${{ inputs.remote_method }}" in
-            ssh) LT_PORT=22 ;;
-            rdp|xrdp|vnc) LT_PORT=3389 ;;
-            rustdesk) LT_PORT=21115 ;;
-            *) LT_PORT=3389 ;;
-          esac
-          lt --port $LT_PORT > localtunnel.log 2>&1 &
+          nohup $BORE local $BORE_PORT --to bore.pub > bore.log 2>&1 &
           sleep 10
-          URL=$(grep -o 'https://[a-z0-9-]*\.loca\.lt' localtunnel.log | head -1)
-          if [[ -n "$URL" ]]; then
-            echo "LOCALTUNNEL_URL=$URL" >> $GITHUB_ENV
-            echo "LocalTunnel: $URL"
-          else
-            echo "LOCALTUNNEL_URL=pending" >> $GITHUB_ENV
-          fi
-
-      # ============================================================
-      # TUNNEL 9 - Expose
-      # ============================================================
-      - name: TUNNEL 9 - Expose
-        if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'expose' }}
-        continue-on-error: true
-        shell: bash
-        run: |
-          echo "=== Expose ==="
-          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
-            echo "Expose not available on Windows"
-            exit 0
-          fi
-          composer global require beyondcode/expose 2>/dev/null || true
-          echo "Expose requires BeyondCode account"
-
-      # ============================================================
-      # REMOTE 7 - TeamViewer
-      # ============================================================
-      - name: REMOTE 7 - TeamViewer
-        if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'teamviewer' }}
-        continue-on-error: true
-        shell: bash
-        run: |
-          echo "=== TeamViewer ==="
-          if [[ -z "${{ inputs.teamviewer_id }}" ]]; then
-            echo "No TeamViewer ID provided, skipping"
-            exit 0
-          fi
-          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
-            curl -fsSL -o "$TEMP/teamviewer.exe" "https://download.teamviewer.com/download/TeamViewer_Setup.exe"
-            "$TEMP/teamviewer.exe" /S
-          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
-            brew install --cask teamviewer
-          else
-            wget -q https://download.teamviewer.com/download/linux/teamviewer_amd64.deb
-            sudo dpkg -i teamviewer_amd64.deb || sudo apt-get install -f -y
-          fi
-          echo "TeamViewer: ID=${{ inputs.teamviewer_id }}"
-
-      # ============================================================
-      # REMOTE 8 - AnyDesk
-      # ============================================================
-      - name: REMOTE 8 - AnyDesk
-        if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'anydesk' }}
-        continue-on-error: true
-        shell: bash
-        run: |
-          echo "=== AnyDesk ==="
-          if [[ -z "${{ inputs.anydesk_id }}" ]]; then
-            echo "No AnyDesk ID provided, skipping"
-            exit 0
-          fi
-          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
-            curl -fsSL -o "$TEMP/anydesk.exe" "https://download.anydesk.com/AnyDesk.exe"
-            "$TEMP/anydesk.exe" --install "$TEMP\AnyDesk" --start-with-win --create-shortcuts --silent
-          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
-            brew install --cask anydesk
-          else
-            wget -qO - https://keys.anydesk.com/repos/DEB-GPG-KEY | sudo apt-key add -
-            echo "deb http://deb.anydesk.com/ all main" | sudo tee /etc/apt/sources.list.d/anydesk-stable.list
-            sudo apt-get update
-            sudo apt-get install -y anydesk
-          fi
-          echo "AnyDesk: ID=${{ inputs.anydesk_id }}"
-
-      # ============================================================
-      # REMOTE 9 - Parsec
-      # ============================================================
-      - name: REMOTE 9 - Parsec
-        if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'parsec' }}
-        continue-on-error: true
-        shell: bash
-        run: |
-          echo "=== Parsec ==="
-          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
-            curl -fsSL -o "$TEMP/parsec.exe" "https://builds.parsecgaming.com/package/parsec-windows.exe"
-            "$TEMP/parsec.exe" /S
-          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
-            brew install --cask parsec
-          else
-            wget -q https://builds.parsecgaming.com/package/parsec-linux.deb
-            sudo dpkg -i parsec-linux.deb || sudo apt-get install -f -y
-          fi
-          echo "Parsec requires manual login via app"
-          echo "Parsec installed"
+          echo "✅ Bore tunnel started on port $BORE_PORT"
 
       # ============================================================
       # PRINT ALL CONNECTION METHODS
       # ============================================================
-      - name: PRINT ALL CONNECTION METHODS
-        shell: bash
+      - name: Print All Connection Methods
         run: |
           echo ""
-          echo "╔══════════════════════════════════════════════════════════════════════════════╗"
-          echo "║                    ALL CONNECTIVITY OPTIONS                                  ║"
-          echo "║                    $(date '+%Y-%m-%d %H:%M:%S')                             ║"
-          echo "╠══════════════════════════════════════════════════════════════════════════════╣"
-          echo "║  OS:        ${{ inputs.os_image }}"
-          echo "║  Runtime:   ${{ inputs.runtime_minutes }} minutes (max 6 hours)"
-          echo "╠══════════════════════════════════════════════════════════════════════════════╣"
-          echo "║               PRIORITY REMOTES (RustDesk / CRD / Tailscale / Ngrok)         ║"
-          echo "╠══════════════════════════════════════════════════════════════════════════════╣"
-          echo "║  RustDesk:"
-          echo "║     ID:       ${RUSTDESK_ID:-Check app}"
-          echo "║     Password: ${RUSTDESK_PASS:-rustdesk123}"
-          [[ -n "${{ inputs.crd_code }}" ]] && echo "║  Chrome RD:   Active | PIN: ${{ inputs.crd_pin }}"
-          [[ -n "$TAILSCALE_IP" ]] && echo "║  Tailscale:   $TAILSCALE_IP (persistent VPN)"
-          [[ -n "$NGROK_URL" ]] && echo "║  Ngrok:       $NGROK_URL (public TCP)"
-          echo "╠══════════════════════════════════════════════════════════════════════════════╣"
-          echo "║                         TUNNELS / NETWORK ACCESS                             ║"
-          echo "╠══════════════════════════════════════════════════════════════════════════════╣"
-          [[ -n "$CF_URL" ]] && echo "║  Cloudflare:     $CF_URL"
-          [[ -n "$LOCALHOST_URL" ]] && echo "║  Localhost.run:  $LOCALHOST_URL"
-          [[ -n "$BORE_URL" ]] && echo "║  Bore:           $BORE_URL"
-          [[ -n "$TELEBIT_URL" ]] && echo "║  Telebit:        $TELEBIT_URL"
-          [[ -n "$LOCALTUNNEL_URL" ]] && echo "║  LocalTunnel:    $LOCALTUNNEL_URL"
-          [[ -n "$PAGEKITE_CMD" ]] && echo "║  PageKite:       $PAGEKITE_CMD (needs signup)"
-          echo "╠══════════════════════════════════════════════════════════════════════════════╣"
-          echo "║                         OTHER REMOTE DESKTOP METHODS                         ║"
-          echo "╠══════════════════════════════════════════════════════════════════════════════╣"
-          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
-            echo "║  RDP:"
-            echo "║     Host: ${TAILSCALE_IP:-N/A}:3389 (Tailscale)"
-            echo "║     Host: ${NGROK_URL:-N/A} (Ngrok)"
-            echo "║     User: $USER_WIN  Pass: $PASS_WIN"
-          fi
-          if [[ "${{ inputs.os_image }}" == "ubuntu-latest" ]]; then
-            echo "║  XRDP: ${TAILSCALE_IP:-N/A}:3389  User: $USER_NIX  Pass: $PASS_NIX"
-          fi
-          if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
-            echo "║  VNC: vnc://${TAILSCALE_IP:-N/A}:5900  Pass: $PASS_NIX"
-          fi
-          if [[ "${{ inputs.os_image }}" != "windows-latest" ]]; then
-            echo "║  SSH: ssh $USER_NIX@${TAILSCALE_IP:-N/A}  Pass: $PASS_NIX"
-          fi
-          [[ -n "${{ inputs.teamviewer_id }}" ]] && echo "║  TeamViewer: ID=${{ inputs.teamviewer_id }}"
-          [[ -n "${{ inputs.anydesk_id }}" ]] && echo "║  AnyDesk: ID=${{ inputs.anydesk_id }}"
-          echo "║  Parsec: Open app, manual login required"
-          echo "╠══════════════════════════════════════════════════════════════════════════════╣"
-          [[ -n "$TAILSCALE_IP" ]] && echo "║  RDP:  mstsc /v:$TAILSCALE_IP"
-          [[ -n "$TAILSCALE_IP" ]] && [[ "${{ inputs.os_image }}" != "windows-latest" ]] && echo "║  SSH:  ssh runner@$TAILSCALE_IP"
-          [[ -n "$NGROK_URL" ]] && echo "║  Ngrok: $(echo $NGROK_URL | sed 's/tcp:\/\///')"
-          echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║           ALL CONNECTIVITY OPTIONS                           ║"
+          echo "║           $(date '+%Y-%m-%d %H:%M:%S')                              ║"
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║  OS:      ${{ inputs.os_image }}                              "
+          echo "║  Runtime: ${{ inputs.runtime_minutes }} minutes (max 6 hours) "
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║           PRIORITY REMOTES                                   ║"
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║  RustDesk:                                                    "
+          echo "║    ID:       ${{ env.RUSTDESK_ID }}                           "
+          echo "║    Password: rustdesk123                                      "
+          echo "║  Tailscale:  ${{ env.TAILSCALE_IP }} (persistent VPN)         "
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║           TUNNELS / NETWORK ACCESS                           ║"
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║  Cloudflare:  ${{ env.CF_URL }}                               "
+          echo "║  Ngrok:       ${{ env.NGROK_URL }}                            "
+          echo "║  LocalTunnel: ${{ env.LOCALHOST_URL }}                        "
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║           OTHER REMOTE DESKTOP METHODS                       ║"
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║  XRDP:  ${{ env.TAILSCALE_IP }}:3389  User: runner  Pass: runner@12345"
+          echo "║  SSH:   ssh runner@${{ env.TAILSCALE_IP }}  Pass: runner@12345"
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║  RDP:   mstsc /v:${{ env.TAILSCALE_IP }}                      "
+          echo "║  SSH:   ssh runner@${{ env.TAILSCALE_IP }}                    "
+          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo ""
 
       # ============================================================
-      # KEEP ALIVE - 6 Hour Loop
+      # KEEP ALIVE LOOP
       # ============================================================
       - name: Keep Alive - 6 Hour Loop
-        shell: bash
         run: |
           RUNTIME=${{ inputs.runtime_minutes }}
-          [[ "$RUNTIME" -gt 360 ]] && RUNTIME=360
-          END=$((SECONDS + RUNTIME * 60))
-          while [ $SECONDS -lt $END ]; do
-            REMAIN=$((END - SECONDS))
-            H=$((REMAIN / 3600))
-            M=$(((REMAIN % 3600) / 60))
-            S=$((REMAIN % 60))
-            echo ""
-            echo "[$(date '+%H:%M:%S')] ${H}h ${M}m ${S}s remaining"
-            echo "    RustDesk:   ${RUSTDESK_ID:-Check app} / Pass: ${RUSTDESK_PASS:-rustdesk123}"
-            echo "    Tailscale:  ${TAILSCALE_IP:-N/A}"
-            echo "    Ngrok:      ${NGROK_URL:-N/A}"
-            echo "    Cloudflare: ${CF_URL:-N/A}"
-            echo "    Localhost:  ${LOCALHOST_URL:-N/A}"
-            echo "    Bore:       ${BORE_URL:-N/A}"
-            if [[ $((SECONDS % 300)) -lt 60 ]]; then
-              [[ -n "$TAILSCALE_IP" ]] && ping -c 1 -W 2 $TAILSCALE_IP >/dev/null 2>&1 \
-                && echo "    Tailscale ping OK" || echo "    Tailscale ping failed"
+          [[ -z "$RUNTIME" ]] && RUNTIME=360
+          for ((i=RUNTIME; i>0; i--)); do
+            echo "[$(date '+%H:%M:%S')] ${i}m remaining"
+            echo "  RustDesk:  ${{ env.RUSTDESK_ID }} / Pass: rustdesk123"
+            echo "  Tailscale: ${{ env.TAILSCALE_IP }}"
+            echo "  Ngrok:     ${{ env.NGROK_URL }}"
+            echo "  Cloudflare: ${{ env.CF_URL }}"
+            echo "  Localhost: ${{ env.LOCALHOST_URL }}"
+
+            # Test services are running
+            if [[ "${{ inputs.os_image }}" == "ubuntu-latest" ]]; then
+              sudo systemctl is-active xrdp >/dev/null 2>&1 && echo "  XRDP: Running" || echo "  XRDP: Stopped"
+              sudo systemctl is-active ssh >/dev/null 2>&1 && echo "  SSH:  Running" || echo "  SSH:  Stopped"
             fi
+
+            # Tailscale ping test
+            if [[ -n "${{ env.TAILSCALE_IP }}" ]]; then
+              tailscale ping -c 1 ${{ env.TAILSCALE_IP }} >/dev/null 2>&1 && echo "  Tailscale ping OK" || echo "  Tailscale ping FAIL"
+            fi
+
             sleep 60
           done
-          echo ""
-          echo "Session complete. Total runtime: ${RUNTIME}m"
+          echo "Runtime completed. Shutting down..."
