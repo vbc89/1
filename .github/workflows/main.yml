@@ -1,4 +1,4 @@
-name: All-Connect Remote Desktop (6 Hours)
+;name: All-Connect Remote Desktop (6 Hours)
 
 on:
   workflow_dispatch:
@@ -127,6 +127,7 @@ jobs:
     steps:
       - name: TUNNEL 1 - Tailscale
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'tailscale' }}
+        continue-on-error: true
         shell: bash
         run: |
           echo "=== Installing Tailscale ==="
@@ -150,19 +151,46 @@ jobs:
 
       - name: TUNNEL 2 - Ngrok
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'ngrok' }}
+        continue-on-error: true
         shell: bash
         run: |
           echo "=== Installing Ngrok ==="
+          # Try multiple install methods
+          NGROK=""
           if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
-            curl -fsSL -o ngrok.zip https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip
-            unzip -o ngrok.zip -d "$TEMP"
-            NGROK="$TEMP/ngrok.exe"
+            # Windows: try chocolatey first, then direct download
+            choco install ngrok -y 2>/dev/null || true
+            if command -v ngrok &> /dev/null; then
+              NGROK="ngrok"
+            else
+              curl -fsSL -o "$TEMP/ngrok.zip" "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" 2>/dev/null || \
+              curl -fsSL -o "$TEMP/ngrok.zip" "https://github.com/ngrok/ngrok/releases/latest/download/ngrok-stable-windows-amd64.zip" 2>/dev/null || true
+              if [[ -f "$TEMP/ngrok.zip" ]]; then
+                unzip -o "$TEMP/ngrok.zip" -d "$TEMP" 2>/dev/null
+                NGROK="$TEMP/ngrok.exe"
+              fi
+            fi
           elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
-            brew install ngrok/ngrok/ngrok
+            brew install ngrok/ngrok/ngrok 2>/dev/null || brew install ngrok 2>/dev/null || true
             NGROK="ngrok"
           else
-            curl -fsSL https://get.ngrok.com/shell | sh
-            NGROK="./ngrok"
+            # Linux: try snap, then direct download
+            sudo snap install ngrok 2>/dev/null || true
+            if command -v ngrok &> /dev/null; then
+              NGROK="ngrok"
+            else
+              curl -fsSL -o "$TEMP/ngrok.tgz" "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz" 2>/dev/null || \
+              curl -fsSL -o "$TEMP/ngrok.tgz" "https://github.com/ngrok/ngrok/releases/latest/download/ngrok-stable-linux-amd64.tgz" 2>/dev/null || true
+              if [[ -f "$TEMP/ngrok.tgz" ]]; then
+                tar xzf "$TEMP/ngrok.tgz" -C "$TEMP" 2>/dev/null
+                NGROK="$TEMP/ngrok"
+              fi
+            fi
+          fi
+          
+          if [[ -z "$NGROK" ]] || [[ ! -x "$NGROK" ]]; then
+            echo "❌ Ngrok installation failed"
+            exit 1
           fi
           
           if [[ -n "${{ inputs.ngrok_token }}" ]]; then
@@ -177,34 +205,54 @@ jobs:
           esac
           
           $NGROK tcp $PORT > ngrok.log 2>&1 &
-          sleep 8
+          sleep 10
           URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"tcp://[^"]*' | cut -d'"' -f4)
-          echo "NGROK_URL=$URL" >> $GITHUB_ENV
-          echo "NGROK_PORT=$(echo $URL | cut -d: -f3)" >> $GITHUB_ENV
-          echo "Ngrok: $URL"
+          if [[ -n "$URL" ]]; then
+            echo "NGROK_URL=$URL" >> $GITHUB_ENV
+            echo "NGROK_PORT=$(echo $URL | cut -d: -f3)" >> $GITHUB_ENV
+            echo "✅ Ngrok: $URL"
+          else
+            echo "⚠️ Ngrok started but URL not available yet"
+            echo "NGROK_URL=pending" >> $GITHUB_ENV
+          fi
 
       - name: TUNNEL 3 - Cloudflare Tunnel
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'cloudflare-tunnel' }}
+        continue-on-error: true
         run: |
           echo "=== Installing Cloudflared ==="
           if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
-            brew install cloudflared
+            brew install cloudflared 2>/dev/null || true
           elif [[ "${{ inputs.os_image }}" == "ubuntu-latest" ]]; then
-            curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-            sudo dpkg -i cloudflared.deb || sudo apt-get install -f -y
+            # Try multiple download sources
+            curl -fsSL -o "$TEMP/cloudflared.deb" "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" 2>/dev/null || \
+            wget -q -O "$TEMP/cloudflared.deb" "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb" 2>/dev/null || true
+            if [[ -f "$TEMP/cloudflared.deb" ]]; then
+              sudo dpkg -i "$TEMP/cloudflared.deb" 2>/dev/null || sudo apt-get install -f -y 2>/dev/null || true
+            fi
           else
             echo "Cloudflare Tunnel not available on Windows"
             exit 0
           fi
           
-          nohup cloudflared tunnel --url "tcp://localhost:3389" > cf.log 2>&1 &
-          sleep 10
-          URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' cf.log | head -1)
-          echo "CF_URL=$URL" >> $GITHUB_ENV
-          echo "Cloudflare: $URL"
+          if command -v cloudflared &> /dev/null; then
+            nohup cloudflared tunnel --url "tcp://localhost:3389" > cf.log 2>&1 &
+            sleep 12
+            URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' cf.log | head -1)
+            if [[ -n "$URL" ]]; then
+              echo "CF_URL=$URL" >> $GITHUB_ENV
+              echo "✅ Cloudflare: $URL"
+            else
+              echo "⚠️ Cloudflare tunnel starting..."
+              echo "CF_URL=pending" >> $GITHUB_ENV
+            fi
+          else
+            echo "⚠️ Cloudflared not installed"
+          fi
 
       - name: TUNNEL 4 - Localhost.run
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'localhost-run' }}
+        continue-on-error: true
         shell: bash
         run: |
           echo "=== Starting Localhost.run ==="
@@ -216,26 +264,44 @@ jobs:
           esac
           
           ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=60 -R 80:localhost:$LOCAL_PORT localhost.run > localhost.log 2>&1 &
-          sleep 12
+          sleep 15
           URL=$(grep -o 'https://[a-z0-9-]*\.lhr\.life' localhost.log | head -1)
-          echo "LOCALHOST_URL=$URL" >> $GITHUB_ENV
-          echo "Localhost.run: $URL"
+          if [[ -n "$URL" ]]; then
+            echo "LOCALHOST_URL=$URL" >> $GITHUB_ENV
+            echo "✅ Localhost.run: $URL"
+          else
+            echo "⚠️ Localhost.run starting..."
+            echo "LOCALHOST_URL=pending" >> $GITHUB_ENV
+          fi
 
       - name: TUNNEL 5 - Bore Tunnel
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'bore-tunnel' }}
+        continue-on-error: true
         shell: bash
         run: |
           echo "=== Installing Bore ==="
           if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
-            curl -fsSL -o "$TEMP/bore.zip" "https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-pc-windows-msvc.zip"
-            unzip -o "$TEMP/bore.zip" -d "$TEMP"
-            BORE="$TEMP/bore.exe"
+            curl -fsSL -o "$TEMP/bore.zip" "https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-pc-windows-msvc.zip" 2>/dev/null || \
+            wget -q -O "$TEMP/bore.zip" "https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-pc-windows-msvc.zip" 2>/dev/null || true
+            if [[ -f "$TEMP/bore.zip" ]]; then
+              unzip -o "$TEMP/bore.zip" -d "$TEMP" 2>/dev/null
+              BORE="$TEMP/bore.exe"
+            fi
           elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
-            brew install bore-cli
+            brew install bore-cli 2>/dev/null || true
             BORE="bore"
           else
-            curl -fsSL https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-unknown-linux-musl.tar.gz | tar xz
-            BORE="./bore"
+            curl -fsSL -o "$TEMP/bore.tar.gz" "https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-unknown-linux-musl.tar.gz" 2>/dev/null || \
+            wget -q -O "$TEMP/bore.tar.gz" "https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-unknown-linux-musl.tar.gz" 2>/dev/null || true
+            if [[ -f "$TEMP/bore.tar.gz" ]]; then
+              tar xzf "$TEMP/bore.tar.gz" -C "$TEMP" 2>/dev/null
+              BORE="$TEMP/bore"
+            fi
+          fi
+          
+          if [[ -z "$BORE" ]] || [[ ! -x "$BORE" ]]; then
+            echo "⚠️ Bore not available, skipping"
+            exit 0
           fi
           
           case "${{ inputs.remote_method }}" in
@@ -246,13 +312,19 @@ jobs:
           esac
           
           $BORE local $BORE_PORT --to bore.pub > bore.log 2>&1 &
-          sleep 5
+          sleep 8
           URL=$(grep -o 'bore\.pub:[0-9]*' bore.log | head -1)
-          echo "BORE_URL=$URL" >> $GITHUB_ENV
-          echo "Bore: $URL"
+          if [[ -n "$URL" ]]; then
+            echo "BORE_URL=$URL" >> $GITHUB_ENV
+            echo "✅ Bore: $URL"
+          else
+            echo "⚠️ Bore starting..."
+            echo "BORE_URL=pending" >> $GITHUB_ENV
+          fi
 
       - name: TUNNEL 6 - Telebit
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'telebit' }}
+        continue-on-error: true
         shell: bash
         run: |
           echo "=== Installing Telebit ==="
@@ -261,16 +333,22 @@ jobs:
             exit 0
           fi
           
-          curl https://get.telebit.io | bash
+          curl -fsSL https://get.telebit.io | bash 2>/dev/null || true
           export PATH="$HOME/.telebit/bin:$PATH"
           telebit relay > telebit.log 2>&1 &
-          sleep 10
+          sleep 12
           URL=$(grep -o 'https://[a-z0-9]*\.telebit\.io' telebit.log | head -1)
-          echo "TELEBIT_URL=$URL" >> $GITHUB_ENV
-          echo "Telebit: $URL"
+          if [[ -n "$URL" ]]; then
+            echo "TELEBIT_URL=$URL" >> $GITHUB_ENV
+            echo "✅ Telebit: $URL"
+          else
+            echo "⚠️ Telebit starting..."
+            echo "TELEBIT_URL=pending" >> $GITHUB_ENV
+          fi
 
       - name: TUNNEL 7 - PageKite
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'pagekite' }}
+        continue-on-error: true
         shell: bash
         run: |
           echo "=== PageKite ==="
@@ -280,15 +358,16 @@ jobs:
           fi
           
           if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
-            brew install pagekite || true
+            brew install pagekite 2>/dev/null || true
           else
-            sudo apt-get install -y pagekite || pip3 install pagekite || true
+            sudo apt-get install -y pagekite 2>/dev/null || pip3 install pagekite 2>/dev/null || true
           fi
           echo "PAGEKITE_CMD=pagekite.py 3389 yourname.pagekite.me" >> $GITHUB_ENV
           echo "PageKite requires manual signup at pagekite.net"
 
       - name: TUNNEL 8 - LocalTunnel
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'localtunnel' }}
+        continue-on-error: true
         shell: bash
         run: |
           echo "=== Installing LocalTunnel ==="
@@ -297,7 +376,7 @@ jobs:
             exit 0
           fi
           
-          npm install -g localtunnel || sudo npm install -g localtunnel
+          npm install -g localtunnel 2>/dev/null || sudo npm install -g localtunnel 2>/dev/null || true
           case "${{ inputs.remote_method }}" in
             ssh) LT_PORT=22 ;;
             rdp|xrdp|vnc) LT_PORT=3389 ;;
@@ -305,13 +384,19 @@ jobs:
             *) LT_PORT=3389 ;;
           esac
           lt --port $LT_PORT > localtunnel.log 2>&1 &
-          sleep 8
+          sleep 10
           URL=$(grep -o 'https://[a-z0-9-]*\.loca\.lt' localtunnel.log | head -1)
-          echo "LOCALTUNNEL_URL=$URL" >> $GITHUB_ENV
-          echo "LocalTunnel: $URL"
+          if [[ -n "$URL" ]]; then
+            echo "LOCALTUNNEL_URL=$URL" >> $GITHUB_ENV
+            echo "✅ LocalTunnel: $URL"
+          else
+            echo "⚠️ LocalTunnel starting..."
+            echo "LOCALTUNNEL_URL=pending" >> $GITHUB_ENV
+          fi
 
       - name: TUNNEL 9 - Expose
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'expose' }}
+        continue-on-error: true
         shell: bash
         run: |
           echo "=== Expose ==="
@@ -320,11 +405,12 @@ jobs:
             exit 0
           fi
           
-          composer global require beyondcode/expose || true
+          composer global require beyondcode/expose 2>/dev/null || true
           echo "Expose requires BeyondCode account"
 
       - name: REMOTE 1 - Windows RDP
         if: ${{ inputs.os_image == 'windows-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'rdp') }}
+        continue-on-error: true
         shell: pwsh
         run: |
           $u=$env:USER_WIN; $p=$env:PASS_WIN
@@ -336,10 +422,11 @@ jobs:
           }
           Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Write-Host "RDP: user=$u / pass=$p"
+          Write-Host "✅ RDP: user=$u / pass=$p"
 
       - name: REMOTE 2 - Linux XRDP
         if: ${{ inputs.os_image == 'ubuntu-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'xrdp') }}
+        continue-on-error: true
         run: |
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies xrdp ssh
@@ -348,19 +435,21 @@ jobs:
           sudo systemctl start xrdp
           sudo usermod -aG ssl-cert $USER
           echo "runner:$PASS_NIX" | sudo chpasswd
-          echo "XRDP: user=runner / pass=$PASS_NIX"
+          echo "✅ XRDP: user=runner / pass=$PASS_NIX"
 
       - name: REMOTE 3 - macOS VNC
         if: ${{ inputs.os_image == 'macos-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'vnc') }}
+        continue-on-error: true
         run: |
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on -restart -agent -privs -all
           sudo systemsetup -setremotelogin on
           echo "runner:$PASS_NIX" | sudo chpasswd
-          echo "VNC + SSH: user=runner / pass=$PASS_NIX"
+          echo "✅ VNC + SSH: user=runner / pass=$PASS_NIX"
 
       - name: REMOTE 4 - SSH
         if: ${{ inputs.os_image != 'windows-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'ssh') }}
+        continue-on-error: true
         run: |
           if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
             sudo systemsetup -setremotelogin on
@@ -372,10 +461,11 @@ jobs:
           echo "runner:$PASS_NIX" | sudo chpasswd
           sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null || true
           sudo systemctl restart ssh 2>/dev/null || true
-          echo "SSH: user=runner / pass=$PASS_NIX"
+          echo "✅ SSH: user=runner / pass=$PASS_NIX"
 
       - name: REMOTE 5 - RustDesk
         if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'rustdesk' }}
+        continue-on-error: true
         shell: bash
         run: |
           echo "=== Installing RustDesk ==="
@@ -395,15 +485,16 @@ jobs:
             sudo ufw allow 21115:21119/tcp 2>/dev/null || true
             sudo ufw allow 21116/udp 2>/dev/null || true
           fi
-          echo "RustDesk installed and running"
+          echo "✅ RustDesk installed and running"
 
       - name: REMOTE 6 - TeamViewer
         if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'teamviewer' }}
+        continue-on-error: true
         shell: bash
         run: |
           echo "=== TeamViewer ==="
           if [[ -z "${{ inputs.teamviewer_id }}" ]]; then
-            echo "No TeamViewer ID provided, skipping"
+            echo "⚠️ No TeamViewer ID provided, skipping"
             exit 0
           fi
           if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
@@ -415,15 +506,16 @@ jobs:
             wget https://download.teamviewer.com/download/linux/teamviewer_amd64.deb
             sudo dpkg -i teamviewer_amd64.deb || sudo apt-get install -f -y
           fi
-          echo "TeamViewer: ID=${{ inputs.teamviewer_id }}"
+          echo "✅ TeamViewer: ID=${{ inputs.teamviewer_id }}"
 
       - name: REMOTE 7 - AnyDesk
         if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'anydesk' }}
+        continue-on-error: true
         shell: bash
         run: |
           echo "=== AnyDesk ==="
           if [[ -z "${{ inputs.anydesk_id }}" ]]; then
-            echo "No AnyDesk ID provided, skipping"
+            echo "⚠️ No AnyDesk ID provided, skipping"
             exit 0
           fi
           if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
@@ -437,15 +529,16 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y anydesk
           fi
-          echo "AnyDesk: ID=${{ inputs.anydesk_id }}"
+          echo "✅ AnyDesk: ID=${{ inputs.anydesk_id }}"
 
       - name: REMOTE 8 - Chrome Remote Desktop
         if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'chrome-remote-desktop' }}
+        continue-on-error: true
         shell: bash
         run: |
           echo "=== Chrome Remote Desktop ==="
           if [[ -z "${{ inputs.crd_code }}" ]]; then
-            echo "No CRD code provided, skipping"
+            echo "⚠️ No CRD code provided, skipping"
             exit 0
           fi
           if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
@@ -466,10 +559,11 @@ jobs:
               --code="${{ inputs.crd_code }}" --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
               --name="$HOSTNAME" --pin="${{ inputs.crd_pin }}"
           fi
-          echo "CRD launched with PIN"
+          echo "✅ CRD launched with PIN"
 
       - name: REMOTE 9 - Parsec
         if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'parsec' }}
+        continue-on-error: true
         shell: bash
         run: |
           echo "=== Parsec ==="
@@ -482,8 +576,8 @@ jobs:
             wget https://builds.parsecgaming.com/package/parsec-linux.deb
             sudo dpkg -i parsec-linux.deb || sudo apt-get install -f -y
           fi
-          echo "Parsec requires manual login via app"
-          echo "Parsec installed"
+          echo "⚠️ Parsec requires manual login via app"
+          echo "✅ Parsec installed"
 
       - name: PRINT ALL CONNECTION METHODS
         shell: bash
