@@ -2,7 +2,7 @@ import { useState } from "react";
 
 const CODE = name: All-Connect Remote Desktop (6 Hours)
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       os_image:
