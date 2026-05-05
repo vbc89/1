@@ -158,8 +158,14 @@ jobs:
               --name="$HOSTNAME" \
               --pin="${{ inputs.crd_pin }}"
           else
+            # Ubuntu: Install CRD with automatic dependency resolution
+            export DEBIAN_FRONTEND=noninteractive
             wget -q https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
-            sudo dpkg -i chrome-remote-desktop_current_amd64.deb || sudo apt-get install -f -y
+            # Use apt-get install instead of dpkg to auto-resolve dependencies
+            sudo apt-get update -y
+            sudo apt-get install -y -f ./chrome-remote-desktop_current_amd64.deb || \
+            (sudo dpkg -i chrome-remote-desktop_current_amd64.deb; sudo apt-get install -f -y)
+
             DISPLAY= /opt/google/chrome-remote-desktop/start-host \
               --code="${{ inputs.crd_code }}" \
               --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
@@ -183,9 +189,16 @@ jobs:
 
           sudo apt-get update -y
 
+          # CRITICAL FIX: Resolve any broken dependencies first
+          echo "Fixing any broken dependencies..."
+          sudo apt-get install -f -y
+          sudo apt-get --fix-broken install -y
+
           # Fix for Ubuntu 24.04: install dependencies first to avoid exit code 100
           echo "Installing XRDP dependencies..."
-          sudo apt-get install -y libfuse2t64 libopus0 xserver-xorg-core xserver-xorg-input-all
+          sudo apt-get install -y libfuse2t64 libopus0 xserver-xorg-core xserver-xorg-input-all \
+            gsettings-desktop-schemas policykit-1 python3-psutil python3-xdg xbase-clients \
+            xserver-xorg-video-dummy libegl1 libxcvt0
 
           # Install xrdp and xorgxrdp separately with --no-install-recommends
           echo "Installing XRDP..."
