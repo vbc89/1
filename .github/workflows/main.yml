@@ -123,6 +123,7 @@ jobs:
       PASS_WIN: Admin@12345
       USER_NIX: runner
       PASS_NIX: runner@12345
+      RDPASS: RustDesk@2026Secure!
 
     steps:
       - name: Setup Base Linux Environment
@@ -230,7 +231,7 @@ jobs:
             sleep 10
             netsh advfirewall firewall add rule name="RD-RustDesk" dir=in action=allow protocol=TCP localport=21115-21119
             netsh advfirewall firewall add rule name="RD-RustDesk-UDP" dir=in action=allow protocol=UDP localport=21116
-            powershell -Command "& 'C:\Program Files\RustDesk\rustdesk.exe' --password rustdesk123" 2>/dev/null || true
+            powershell -Command "& 'C:\Program Files\RustDesk\rustdesk.exe' --password $env:RDPASS" 2>/dev/null || true
             sleep 2
             RDID=$(powershell -Command "& 'C:\Program Files\RustDesk\rustdesk.exe' --get-id" 2>/dev/null | tr -d '\r' || echo "check-app")
           elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
@@ -241,20 +242,28 @@ jobs:
           else
             wget -q "https://github.com/rustdesk/rustdesk/releases/download/${LATEST}/rustdesk-${LATEST}-x86_64.deb" -O /tmp/rustdesk.deb
             sudo dpkg -i /tmp/rustdesk.deb 2>/dev/null || sudo apt-get install -f -y
+
+            # Create config with stronger password
             mkdir -p ~/.config/rustdesk
-            echo "rustdesk123" > ~/.config/rustdesk/password
+            echo "$RDPASS" > ~/.config/rustdesk/password
             chmod 600 ~/.config/rustdesk/password
-            rustdesk --password rustdesk123 &
+
+            # Set password using RustDesk command
+            rustdesk --password "$RDPASS" &
             sleep 10
+
+            # Also try setting via config file directly
+            sudo bash -c "echo '$RDPASS' > /root/.config/rustdesk/password" 2>/dev/null || true
+
             RDID=$(rustdesk --get-id 2>/dev/null || echo "check-app")
             sudo ufw allow 21115:21119/tcp 2>/dev/null || true
             sudo iptables -I INPUT -p tcp --dport 21115:21119 -j ACCEPT 2>/dev/null || true
             sudo iptables -I INPUT -p udp --dport 21116 -j ACCEPT 2>/dev/null || true
           fi
           echo "RUSTDESK_ID=$RDID" >> $GITHUB_ENV
-          echo "RUSTDESK_PASS=rustdesk123" >> $GITHUB_ENV
+          echo "RUSTDESK_PASS=$RDPASS" >> $GITHUB_ENV
           echo "RustDesk ID: $RDID"
-          echo "RustDesk Pass: rustdesk123"
+          echo "RustDesk Pass: $RDPASS"
 
       - name: REMOTE 2 - Chrome Remote Desktop
         if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'chrome-remote-desktop' }}
@@ -298,46 +307,57 @@ jobs:
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Write-Host "RDP: user=$u / pass=$p"
 
-      - name: REMOTE 4 - Linux XRDP
+      - name: REMOTE 4 - Linux XRDP with Full Ubuntu 22.04 Desktop
         if: ${{ inputs.os_image == 'ubuntu-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'xrdp') }}
         continue-on-error: false
         run: |
-          echo "=== Installing Full Linux Desktop ==="
+          echo "=== Installing Full Ubuntu 22.04 LTS Desktop ==="
           export DEBIAN_FRONTEND=noninteractive
 
           sudo apt-get update -y
-          sudo apt-get install -y xfce4 xfce4-goodies xrdp xorgxrdp openssh-server
 
-          # Write startwm.sh using printf to avoid YAML/heredoc issues
-          printf '%s\n' '#!/bin/sh' 'if [ -r /etc/profile ]; then . /etc/profile; fi' 'unset DBUS_SESSION_BUS_ADDRESS' 'unset XDG_RUNTIME_DIR' 'startxfce4' | sudo tee /etc/xrdp/startwm.sh > /dev/null
+          # Install FULL Ubuntu desktop with ALL default apps
+          # This includes: Firefox, LibreOffice, Thunderbird, Rhythmbox, etc.
+          sudo apt-get install -y ubuntu-desktop xrdp xorgxrdp openssh-server
+
+          # Configure XRDP for Ubuntu GNOME session
+          printf '%s\n' '#!/bin/sh' 'if [ -r /etc/profile ]; then . /etc/profile; fi' 'unset DBUS_SESSION_BUS_ADDRESS' 'unset XDG_RUNTIME_DIR' 'export GNOME_SHELL_SESSION_MODE=ubuntu' 'export XDG_CURRENT_DESKTOP=ubuntu:GNOME' 'export XDG_CONFIG_DIRS=/etc/xdg/xdg-ubuntu:/etc/xdg' 'gnome-session' | sudo tee /etc/xrdp/startwm.sh > /dev/null
           sudo chmod +x /etc/xrdp/startwm.sh
 
+          # Configure XRDP settings
           sudo sed -i 's/^port=.*/port=3389/' /etc/xrdp/xrdp.ini 2>/dev/null || true
           sudo sed -i 's/^max_bpp=.*/max_bpp=32/' /etc/xrdp/xrdp.ini 2>/dev/null || true
           sudo sed -i 's/^xserverbpp=.*/xserverbpp=32/' /etc/xrdp/xrdp.ini 2>/dev/null || true
+
+          # Enable systemd for graphical sessions (needed for GNOME)
+          sudo systemctl set-default graphical.target 2>/dev/null || true
 
           sudo usermod -aG ssl-cert $USER
           echo "runner:$PASS_NIX" | sudo chpasswd
           sudo usermod -p $(openssl passwd -1 "$PASS_NIX") runner 2>/dev/null || true
           sudo usermod -s /bin/bash runner 2>/dev/null || true
 
-          printf 'xfce4-session\n' | sudo tee /home/runner/.xsession > /dev/null
+          # Create .xsession for GNOME
+          printf 'gnome-session\n' | sudo tee /home/runner/.xsession > /dev/null
           sudo chown runner:runner /home/runner/.xsession 2>/dev/null || true
           sudo chmod 644 /home/runner/.xsession 2>/dev/null || true
 
-          printf 'xfce4-session\n' > ~/.xsession
+          printf 'gnome-session\n' > ~/.xsession
           chmod 644 ~/.xsession
 
+          # Start XRDP
           sudo systemctl enable xrdp || true
           sudo systemctl restart xrdp || sudo service xrdp restart || true
           sleep 3
           sudo systemctl status xrdp --no-pager || true
 
+          # Open firewall
           sudo ufw allow 3389/tcp 2>/dev/null || true
           sudo iptables -I INPUT -p tcp --dport 3389 -j ACCEPT 2>/dev/null || true
           sudo ss -tlnp | grep 3389 || sudo netstat -tlnp | grep 3389 || echo "WARNING: XRDP not listening"
 
           echo "XRDP: user=runner / pass=$PASS_NIX"
+          echo "Full Ubuntu 22.04 LTS Desktop ready on port 3389"
 
       - name: REMOTE 5 - macOS VNC
         if: ${{ inputs.os_image == 'macos-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'vnc') }}
@@ -363,7 +383,6 @@ jobs:
 
             sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
 
-            # Write config using printf instead of heredoc to avoid YAML issues
             printf '%s\n' 'PasswordAuthentication yes' 'PermitRootLogin no' 'ChallengeResponseAuthentication yes' 'UsePAM yes' | sudo tee /etc/ssh/sshd_config.d/99-github-actions.conf > /dev/null
 
             sudo sed -i '/^DenyUsers/d' /etc/ssh/sshd_config
@@ -492,7 +511,7 @@ jobs:
           echo "  PRIORITY REMOTES"
           echo "=========================================="
           echo "  RustDesk ID: ${{ env.RUSTDESK_ID }}"
-          echo "  RustDesk Pass: rustdesk123"
+          echo "  RustDesk Pass: ${{ env.RUSTDESK_PASS }}"
           echo "  Tailscale: ${{ env.TAILSCALE_IP }}"
           echo "=========================================="
           echo "  TUNNELS"
@@ -515,7 +534,7 @@ jobs:
           [[ -z "$RUNTIME" ]] && RUNTIME=360
           for ((i=RUNTIME; i>0; i--)); do
             echo "[$(date '+%H:%M:%S')] ${i}m remaining"
-            echo "  RustDesk: ${{ env.RUSTDESK_ID }} / Pass: rustdesk123"
+            echo "  RustDesk: ${{ env.RUSTDESK_ID }} / Pass: ${{ env.RUSTDESK_PASS }}"
             echo "  Tailscale: ${{ env.TAILSCALE_IP }}"
             echo "  Ngrok: ${{ env.NGROK_URL }}"
             echo "  Cloudflare: ${{ env.CF_URL }}"
