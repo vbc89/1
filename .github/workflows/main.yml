@@ -44,6 +44,13 @@ on:
           - pagekite
           - localtunnel
           - expose
+      crd_link:
+        description: "Chrome Remote Desktop FULL LINK (auto-extracts code) OR paste code only"
+        required: false
+      crd_pin:
+        description: "CRD PIN (6-12 digits)"
+        required: false
+        default: "123456"
       ts_authkey:
         description: "Tailscale Auth Key (required for tailscale)"
         required: false
@@ -59,13 +66,6 @@ on:
       anydesk_id:
         description: "AnyDesk ID (optional)"
         required: false
-      crd_code:
-        description: "Chrome Remote Desktop Code (optional)"
-        required: false
-      crd_pin:
-        description: "CRD PIN (6-12 digits)"
-        required: false
-        default: "123456"
       runtime_minutes:
         description: "Runtime (max 360 = 6 hours)"
         required: false
@@ -75,11 +75,22 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - name: Validate Inputs
+      - name: Validate Inputs & Auto-Extract CRD Code
         run: |
           OS="${{ inputs.os_image }}"
           METHOD="${{ inputs.remote_method }}"
           TUNNEL="${{ inputs.tunnels }}"
+          CRD_INPUT="${{ inputs.crd_link }}"
+
+          # === AUTO-EXTRACT CRD CODE FROM FULL LINK ===
+          if [[ -n "$CRD_INPUT" ]]; then
+            # Extract code= parameter from URL, or use bare code
+            CRD_CODE=$(echo "$CRD_INPUT" | grep -oP '[?&]code=\K[^&\s]+' || echo "$CRD_INPUT")
+            # Clean up any trailing params or newlines
+            CRD_CODE=$(echo "$CRD_CODE" | tr -d '\r\n' | sed 's/[?&].*//')
+            echo "CRD_CODE=$CRD_CODE" >> $GITHUB_ENV
+            echo "Extracted CRD Code: ${CRD_CODE:0:30}..."
+          fi
 
           if [[ "$METHOD" != "all" ]]; then
             VALID="false"
@@ -124,10 +135,12 @@ jobs:
       USER_NIX: runner
       PASS_NIX: runner@12345
       RDPASS: RustDesk@2026Secure!
+      CRD_CODE: ${{ needs.validate.outputs.crd_code || inputs.crd_link }}
 
     steps:
       # ============================================================
       # PHASE 0: START CHROME REMOTE DESKTOP IMMEDIATELY
+      # Auto-extracts code from pasted link
       # ============================================================
       - name: PHASE 0 - Start Chrome Remote Desktop (IMMEDIATE)
         if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'chrome-remote-desktop' }}
@@ -137,34 +150,43 @@ jobs:
           echo "=========================================="
           echo "  PHASE 0: STARTING CRD (IMMEDIATE)"
           echo "=========================================="
-          if [[ -z "${{ inputs.crd_code }}" ]]; then
-            echo "No CRD code provided, skipping"
+          
+          # Auto-extract from link if full URL pasted
+          CRD_RAW="${{ inputs.crd_link }}"
+          if [[ -n "$CRD_RAW" ]]; then
+            CRD_CODE=$(echo "$CRD_RAW" | grep -oP '[?&]code=\K[^&\s]+' || echo "$CRD_RAW")
+            CRD_CODE=$(echo "$CRD_CODE" | tr -d '\r\n' | sed 's/[?&].*//')
+            echo "Using CRD Code: ${CRD_CODE:0:30}..."
+          else
+            echo "No CRD link/code provided, skipping"
             exit 0
           fi
+
           if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
             curl -fsSL -o "$TEMP/crd.msi" "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi"
             msiexec /i "$TEMP/crd.msi" /quiet /norestart
             "C:\Program Files (x86)\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe" \
-              --code="${{ inputs.crd_code }}" \
+              --code="$CRD_CODE" \
               --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
               --name="$COMPUTERNAME" \
               --pin="${{ inputs.crd_pin }}"
           elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
             brew install --cask chrome-remote-desktop
             /Applications/Chrome\ Remote\ Desktop\ Host.app/Contents/MacOS/remoting_start_host \
-              --code="${{ inputs.crd_code }}" \
+              --code="$CRD_CODE" \
               --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
               --name="$HOSTNAME" \
               --pin="${{ inputs.crd_pin }}"
           else
+            # Ubuntu: Install CRD with automatic dependency resolution
             export DEBIAN_FRONTEND=noninteractive
             wget -q https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
             sudo apt-get update -y
             sudo apt-get install -y -f ./chrome-remote-desktop_current_amd64.deb || \
-            (sudo dpkg -i chrome-remote-desktop_current_amd64.deb; sudo apt-get install -f -y)
+            (sudo dpkg -i ./chrome-remote-desktop_current_amd64.deb; sudo apt-get install -f -y)
 
             DISPLAY= /opt/google/chrome-remote-desktop/start-host \
-              --code="${{ inputs.crd_code }}" \
+              --code="$CRD_CODE" \
               --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
               --name="$HOSTNAME" \
               --pin="${{ inputs.crd_pin }}"
@@ -174,7 +196,7 @@ jobs:
 
       # ============================================================
       # PHASE 1: FAST RAT SETUP - Minimal Ubuntu (NO BLOAT)
-      # Replaces heavy XFCE4 with Openbox + Xorg (starts in ~2 min)
+      # Openbox + Chromium (replaces broken firefox-esr)
       # ============================================================
       - name: PHASE 1 - Fast RAT Setup (Minimal Desktop)
         if: ${{ inputs.os_image == 'ubuntu-latest' }}
@@ -192,14 +214,19 @@ jobs:
 
           # === ULTRA LIGHTWEIGHT STACK ===
           # Openbox: ~15MB window manager (vs XFCE4 ~500MB)
-          # No desktop environment, just a window manager + panel
           echo "Installing minimal window manager..."
           sudo apt-get install -y --no-install-recommends \
             xserver-xorg-core xserver-xorg-input-all \
             openbox obconf lxpanel pcmanfm xterm \
             x11-xserver-utils xinit \
             libfuse2t64 libopus0 \
-            curl wget net-tools iputils-ping firefox-esr
+            curl wget net-tools iputils-ping
+
+          # Install Chromium instead of firefox-esr (not available on Noble 24.04)
+          echo "Installing Chromium browser..."
+          sudo apt-get install -y --no-install-recommends chromium-browser || \
+          sudo apt-get install -y --no-install-recommends chromium || \
+          (sudo snap install chromium 2>/dev/null || true)
 
           # Install XRDP only (no xorgxrdp bloat)
           echo "Installing XRDP..."
@@ -724,7 +751,7 @@ jobs:
           echo "╠══════════════════════════════════════════════════════════════╣"
           echo "║  Chrome Remote Desktop:                                      ║"
           echo "║    PIN:      ${{ inputs.crd_pin }}                            "
-          echo "║    Code:     ${{ inputs.crd_code }}                           "
+          echo "║    Link:     ${{ inputs.crd_link }}                           "
           echo "║    Status:   ${{ env.CRD_STATUS }}                            "
           echo "║  Tailscale:  ${{ env.TAILSCALE_IP }} (persistent VPN)         "
           echo "║  RustDesk:                                                   ║"
