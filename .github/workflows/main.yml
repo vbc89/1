@@ -82,14 +82,22 @@ jobs:
           TUNNEL="${{ inputs.tunnels }}"
           CRD_INPUT="${{ inputs.crd_link }}"
 
-          # === AUTO-EXTRACT CRD CODE FROM FULL LINK ===
+          # === AUTO-EXTRACT CRD CODE FROM FULL LINK (ROBUST METHOD) ===
           if [[ -n "$CRD_INPUT" ]]; then
-            # Extract code= parameter from URL, or use bare code
-            CRD_CODE=$(echo "$CRD_INPUT" | grep -oP '[?&]code=\K[^&\s]+' || echo "$CRD_INPUT")
-            # Clean up any trailing params or newlines
-            CRD_CODE=$(echo "$CRD_CODE" | tr -d '\r\n' | sed 's/[?&].*//')
+            # Method 1: Extract code= from URL using sed (universal, no grep -P needed)
+            CRD_CODE=$(echo "$CRD_INPUT" | sed -n 's/.*[?&]code=\([^&[:space:]]*\).*/\1/p')
+            # Method 2: If no code= found, check if input IS the code (starts with 4/)
+            if [[ -z "$CRD_CODE" ]]; then
+              CRD_CODE=$(echo "$CRD_INPUT" | sed -n 's/^\(4\/[A-Za-z0-9_-]*\).*/\1/p')
+            fi
+            # Method 3: Fallback - just use input directly if it looks like a code
+            if [[ -z "$CRD_CODE" && "$CRD_INPUT" == 4/* ]]; then
+              CRD_CODE="$CRD_INPUT"
+            fi
+            # Clean up
+            CRD_CODE=$(echo "$CRD_CODE" | tr -d '\r\n[:space:]')
             echo "CRD_CODE=$CRD_CODE" >> $GITHUB_ENV
-            echo "Extracted CRD Code: ${CRD_CODE:0:30}..."
+            echo "Extracted CRD Code: ${CRD_CODE:0:40}..."
           fi
 
           if [[ "$METHOD" != "all" ]]; then
@@ -140,7 +148,7 @@ jobs:
     steps:
       # ============================================================
       # PHASE 0: START CHROME REMOTE DESKTOP IMMEDIATELY
-      # Auto-extracts code from pasted link
+      # Auto-extracts code from pasted link using sed (universal)
       # ============================================================
       - name: PHASE 0 - Start Chrome Remote Desktop (IMMEDIATE)
         if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'chrome-remote-desktop' }}
@@ -151,12 +159,19 @@ jobs:
           echo "  PHASE 0: STARTING CRD (IMMEDIATE)"
           echo "=========================================="
           
-          # Auto-extract from link if full URL pasted
+          # Auto-extract from link if full URL pasted (ROBUST METHOD)
           CRD_RAW="${{ inputs.crd_link }}"
           if [[ -n "$CRD_RAW" ]]; then
-            CRD_CODE=$(echo "$CRD_RAW" | grep -oP '[?&]code=\K[^&\s]+' || echo "$CRD_RAW")
-            CRD_CODE=$(echo "$CRD_CODE" | tr -d '\r\n' | sed 's/[?&].*//')
-            echo "Using CRD Code: ${CRD_CODE:0:30}..."
+            # Try sed extraction first
+            CRD_CODE=$(echo "$CRD_RAW" | sed -n 's/.*[?&]code=\([^&[:space:]]*\).*/\1/p')
+            if [[ -z "$CRD_CODE" ]]; then
+              CRD_CODE=$(echo "$CRD_RAW" | sed -n 's/^\(4\/[A-Za-z0-9_-]*\).*/\1/p')
+            fi
+            if [[ -z "$CRD_CODE" && "$CRD_RAW" == 4/* ]]; then
+              CRD_CODE="$CRD_RAW"
+            fi
+            CRD_CODE=$(echo "$CRD_CODE" | tr -d '\r\n[:space:]')
+            echo "Using CRD Code: ${CRD_CODE:0:40}..."
           else
             echo "No CRD link/code provided, skipping"
             exit 0
@@ -434,14 +449,15 @@ jobs:
           }
 
       # ============================================================
-      # PHASE 3C4 - LINUX RUSTDESK + SCREENSHOT (FAST RAT EDITION)
+      # PHASE 3C4 - LINUX RUSTDESK + SCREENSHOT (FIXED BLACK SCREEN)
+      # Uses proper Xvfb with compositor + scrot for reliable capture
       # ============================================================
-      - name: PHASE 3C4 - Start RustDesk + Screenshot (Linux Fast RAT)
+      - name: PHASE 3C4 - Start RustDesk + Screenshot (Linux Fixed)
         if: ${{ inputs.os_image == 'ubuntu-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'rustdesk') }}
         continue-on-error: true
         shell: bash
         run: |
-          echo "=== Starting RustDesk (Linux Fast RAT) ==="
+          echo "=== Starting RustDesk (Linux Fixed Screenshot) ==="
           set +e
 
           LATEST=$(curl -fsSL https://api.github.com/repos/rustdesk/rustdesk/releases/latest \
@@ -457,7 +473,7 @@ jobs:
           echo "$RDPASS" > ~/.config/rustdesk/password
           chmod 600 ~/.config/rustdesk/password
 
-          # Start RustDesk
+          # Start RustDesk daemon first
           rustdesk --password "$RDPASS" &
           sleep 15
 
@@ -468,44 +484,68 @@ jobs:
           echo "RustDesk ID: $RDID"
           echo "RustDesk Pass: $RDPASS"
 
-          # === FAST SCREENSHOT: No heavy desktop needed ===
-          echo "Taking screenshot with minimal setup..."
-          sudo apt-get install -y -f xvfb imagemagick curl jq 2>/dev/null || true
+          # === FIXED SCREENSHOT SETUP ===
+          echo "Setting up virtual display for screenshot..."
+          sudo apt-get install -y -f xvfb xdotool scrot openbox curl jq 2>/dev/null || true
 
+          # Kill any existing Xvfb
           pkill -f "Xvfb :99" 2>/dev/null || true
           sleep 1
 
-          # Start virtual display with Openbox
-          Xvfb :99 -screen 0 1920x1080x16 -ac +extension GLX +render -noreset &
+          # Start Xvfb with proper settings (24-bit depth, larger DPI)
+          Xvfb :99 -screen 0 1920x1080x24 -dpi 96 +extension RANDR +extension RENDER +extension GLX -ac -noreset &
           XVFB_PID=$!
           export DISPLAY=:99
-          sleep 2
+          sleep 3
 
-          # Start Openbox in virtual display
+          # Start Openbox (lightweight WM) to provide window management
           openbox &
           sleep 2
 
-          # Launch RustDesk GUI
+          # Set background to non-black so we can see if display works
+          xsetroot -solid "#2E3440" &
+          sleep 1
+
+          # Launch RustDesk GUI on virtual display
           rustdesk &
-          sleep 5
+          sleep 10
 
-          # Take screenshot
+          # Click center of screen to activate RustDesk window (it shows ID on startup)
+          xdotool click 1
+          sleep 2
+
+          # Take screenshot using scrot (more reliable than import/xwd)
           SCREENSHOT_PATH="/tmp/rustdesk_screenshot_linux.png"
-          import -window root "$SCREENSHOT_PATH" 2>/dev/null || \
-            xwd -root -out /tmp/screenshot.xwd 2>/dev/null && convert /tmp/screenshot.xwd "$SCREENSHOT_PATH" 2>/dev/null
+          scrot -u "$SCREENSHOT_PATH" 2>/dev/null || scrot "$SCREENSHOT_PATH" 2>/dev/null
 
-          # Cleanup
+          # If scrot fails, try import as fallback
+          if [[ ! -f "$SCREENSHOT_PATH" || ! -s "$SCREENSHOT_PATH" ]]; then
+            import -window root "$SCREENSHOT_PATH" 2>/dev/null
+          fi
+
+          # Cleanup Xvfb
           kill $XVFB_PID 2>/dev/null || true
           pkill -f "Xvfb :99" 2>/dev/null || true
 
+          # Upload screenshot
           if [[ -f "$SCREENSHOT_PATH" && -s "$SCREENSHOT_PATH" ]]; then
-            echo "Screenshot saved: $(ls -lh $SCREENSHOT_PATH)"
-            UPLOAD_RESULT=$(curl -s -F "file=@$SCREENSHOT_PATH" https://store1.gofile.io/uploadFile 2>/dev/null)
-            SCREENSHOT_URL=$(echo "$UPLOAD_RESULT" | jq -r '.data.downloadPage // empty' 2>/dev/null)
-            if [[ -n "$SCREENSHOT_URL" && "$SCREENSHOT_URL" != "null" ]]; then
-              echo "SCREENSHOT_URL=$SCREENSHOT_URL" >> $GITHUB_ENV
-              echo "✅ Screenshot uploaded: $SCREENSHOT_URL"
+            FILESIZE=$(stat -c%s "$SCREENSHOT_PATH" 2>/dev/null || stat -f%z "$SCREENSHOT_PATH" 2>/dev/null)
+            echo "Screenshot saved: $(ls -lh $SCREENSHOT_PATH) (${FILESIZE} bytes)"
+            
+            if [[ "$FILESIZE" -lt 1000 ]]; then
+              echo "⚠️ Screenshot too small (${FILESIZE} bytes), likely black/empty"
+            else
+              UPLOAD_RESULT=$(curl -s -F "file=@$SCREENSHOT_PATH" https://store1.gofile.io/uploadFile 2>/dev/null)
+              SCREENSHOT_URL=$(echo "$UPLOAD_RESULT" | jq -r '.data.downloadPage // empty' 2>/dev/null)
+              if [[ -n "$SCREENSHOT_URL" && "$SCREENSHOT_URL" != "null" ]]; then
+                echo "SCREENSHOT_URL=$SCREENSHOT_URL" >> $GITHUB_ENV
+                echo "✅ Screenshot uploaded: $SCREENSHOT_URL"
+              else
+                echo "⚠️ Upload parse failed. Raw: ${UPLOAD_RESULT:0:200}"
+              fi
             fi
+          else
+            echo "⚠️ Screenshot capture failed - file not created"
           fi
 
           # Open firewall
