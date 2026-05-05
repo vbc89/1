@@ -1,0 +1,458 @@
+name: 🌐 All-Connect Remote Desktop (6 Hours)
+
+on:
+  workflow_dispatch:
+    inputs:
+      os_image:
+        description: "🖥️ OS Image"
+        required: true
+        default: "windows-latest"
+        type: choice
+        options:
+          - windows-latest
+          - ubuntu-latest
+          - macos-latest
+      
+      remote_method:
+        description: "🎯 Primary Remote Method"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all          # Enable everything
+          - rdp          # Windows native
+          - ssh          # Linux/macOS
+          - xrdp         # Linux desktop
+          - vnc          # macOS/Linux
+          - rustdesk     # Cross-platform
+          - teamviewer   # Commercial
+          - anydesk      # Commercial
+          - chrome-remote-desktop  # Google
+          - parsec       # Gaming/low latency
+      
+      tunnels:
+        description: "🔗 Tunnels (select all that apply)"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - tailscale
+          - ngrok
+          - cloudflare-tunnel
+          - localhost-run
+          - bore-tunnel    # Open source
+          - telebit        # P2P
+          - pagekite       # Reverse proxy
+          - localtunnel    # Node.js
+          - expose         # PHP
+      
+      ts_authkey:
+        description: "🔑 Tailscale Auth Key"
+        required: false
+      
+      ngrok_token:
+        description: "🔑 Ngrok Authtoken"
+        required: false
+      
+      cf_token:
+        description: "🔑 Cloudflare Token (optional)"
+        required: false
+      
+      teamviewer_id:
+        description: "📺 TeamViewer ID (optional)"
+        required: false
+      
+      anydesk_id:
+        description: "📺 AnyDesk ID (optional)"
+        required: false
+      
+      crd_code:
+        description: "📺 Chrome Remote Desktop Code (optional)"
+        required: false
+      
+      crd_pin:
+        description: "📌 CRD PIN (6-12 digits)"
+        required: false
+        default: "123456"
+      
+      runtime_minutes:
+        description: "⏱️ Runtime (max 360 = 6 hours)"
+        required: false
+        default: "360"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate Inputs
+        run: |
+          OS="${{ inputs.os_image }}"
+          METHOD="${{ inputs.remote_method }}"
+          TUNNEL="${{ inputs.tunnels }}"
+          
+          # OS compatibility matrix
+          declare -A METHOD_COMPAT
+          METHOD_COMPAT[windows-latest]="rdp rustdesk teamviewer anydesk chrome-remote-desktop parsec"
+          METHOD_COMPAT[ubuntu-latest]="ssh xrdp vnc rustdesk teamviewer anydesk chrome-remote-desktop parsec"
+          METHOD_COMPAT[macos-latest]="ssh vnc rustdesk teamviewer anydesk chrome-remote-desktop parsec"
+          
+          if [[ "$METHOD" != "all" ]]; then
+            if [[ ! " ${METHOD_COMPAT[$OS]} " =~ " $METHOD " ]]; then
+              echo "❌ '$METHOD' not available on $OS"
+              echo "✅ Available: ${METHOD_COMPAT[$OS]}"
+              exit 1
+            fi
+          fi
+          
+          # Auth checks
+          if [[ "$TUNNEL" == "all" || "$TUNNEL" == "tailscale" ]] && [[ -z "${{ inputs.ts_authkey }}" ]]; then
+            echo "⚠️ Tailscale selected but no authkey provided"
+          fi
+          if [[ "$TUNNEL" == "all" || "$TUNNEL" == "ngrok" ]] && [[ -z "${{ inputs.ngrok_token }}" ]]; then
+            echo "⚠️ Ngrok selected but no token provided"
+          fi
+          
+          echo "✅ Validation passed"
+
+  remote-desktop:
+    needs: validate
+    runs-on: ${{ inputs.os_image }}
+    timeout-minutes: 370
+    env:
+      USER_WIN: Admin
+      PASS_WIN: Admin@12345
+      USER_NIX: runner
+      PASS_NIX: runner@12345
+
+    steps:
+      # ═══════════════════════════════════════════════════════════════
+      # SECTION 1: ALL TUNNELS (Parallel Installation)
+      # ═══════════════════════════════════════════════════════════════
+      
+      - name: 🔗 TUNNEL 1: Tailscale (Mesh VPN)
+        if: inputs.tunnels == 'all' || inputs.tunnels == 'tailscale'
+        shell: bash
+        run: |
+          echo "=== Installing Tailscale ==="
+          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
+            curl -fsSL -o "$TEMP/tailscale.msi" "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+            msiexec /i "$TEMP/tailscale.msi" /quiet /norestart
+            "/c/Program Files/Tailscale/tailscale.exe" logout 2>/dev/null || true
+            "/c/Program Files/Tailscale/tailscale.exe" up --authkey="${{ inputs.ts_authkey }}" --hostname="gh-${GITHUB_RUN_ID}" --accept-dns --accept-routes
+            IP=$("/c/Program Files/Tailscale/tailscale.exe" ip -4 | head -1)
+          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
+            brew install tailscale
+            sudo tailscale up --authkey="${{ inputs.ts_authkey }}" --hostname="gh-${GITHUB_RUN_ID}"
+            IP=$(sudo tailscale ip -4 | head -1)
+          else
+            curl -fsSL https://tailscale.com/install.sh | sh
+            sudo tailscale up --authkey="${{ inputs.ts_authkey }}" --hostname="gh-${GITHUB_RUN_ID}"
+            IP=$(tailscale ip -4 | head -1)
+          fi
+          echo "TAILSCALE_IP=$IP" >> $GITHUB_ENV
+          echo "TAILSCALE_CMD=$(which tailscale || echo 'C:\Program Files\Tailscale\tailscale.exe')" >> $GITHUB_ENV
+          echo "✅ Tailscale: $IP"
+
+      - name: 🔗 TUNNEL 2: Ngrok (Public URL)
+        if: inputs.tunnels == 'all' || inputs.tunnels == 'ngrok'
+        shell: bash
+        run: |
+          echo "=== Installing Ngrok ==="
+          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
+            curl -fsSL -o ngrok.zip https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip
+            unzip -o ngrok.zip -d "$TEMP"
+            NGROK="$TEMP/ngrok.exe"
+          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
+            brew install ngrok/ngrok/ngrok
+            NGROK="ngrok"
+          else
+            curl -fsSL https://get.ngrok.com/shell | sh
+            NGROK="./ngrok"
+          fi
+          
+          if [[ -n "${{ inputs.ngrok_token }}" ]]; then
+            $NGROK authtoken "${{ inputs.ngrok_token }}"
+          fi
+          
+          # Determine port
+          case "${{ inputs.remote_method }}" in
+            rdp|xrdp|vnc) PORT=3389 ;;
+            ssh) PORT=22 ;;
+            rustdesk) PORT=21115 ;;
+            *) PORT=3389 ;;
+          esac
+          
+          $NGROK tcp $PORT > ngrok.log 2>&1 &
+          sleep 8
+          URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"tcp://[^"]*' | cut -d'"' -f4)
+          echo "NGROK_URL=$URL" >> $GITHUB_ENV
+          echo "NGROK_PORT=$(echo $URL | cut -d: -f3)" >> $GITHUB_ENV
+          echo "✅ Ngrok: $URL"
+
+      - name: 🔗 TUNNEL 3: Cloudflare Tunnel
+        if: (inputs.tunnels == 'all' || inputs.tunnels == 'cloudflare-tunnel') && inputs.os_image != 'windows-latest'
+        run: |
+          echo "=== Installing Cloudflared ==="
+          if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
+            brew install cloudflared
+          else
+            curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+            sudo dpkg -i cloudflared.deb || sudo apt-get install -f -y
+          fi
+          
+          nohup cloudflared tunnel --url "tcp://localhost:${{ inputs.remote_method == 'ssh' && 22 || 3389 }}" > cf.log 2>&1 &
+          sleep 10
+          URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' cf.log | head -1)
+          echo "CF_URL=$URL" >> $GITHUB_ENV
+          echo "✅ Cloudflare: $URL"
+
+      - name: 🔗 TUNNEL 4: Localhost.run (No Signup)
+        if: inputs.tunnels == 'all' || inputs.tunnels == 'localhost-run'
+        shell: bash
+        run: |
+          echo "=== Starting Localhost.run ==="
+          case "${{ inputs.remote_method }}" in
+            ssh) LOCAL_PORT=22 ;;
+            rdp|xrdp|vnc) LOCAL_PORT=3389 ;;
+            rustdesk) LOCAL_PORT=21115 ;;
+            *) LOCAL_PORT=3389 ;;
+          esac
+          
+          ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=60 -R 80:localhost:$LOCAL_PORT localhost.run > localhost.log 2>&1 &
+          sleep 12
+          URL=$(grep -o 'https://[a-z0-9-]*\.lhr\.life' localhost.log | head -1)
+          echo "LOCALHOST_URL=$URL" >> $GITHUB_ENV
+          echo "✅ Localhost.run: $URL"
+
+      - name: 🔗 TUNNEL 5: Bore Tunnel (Open Source)
+        if: inputs.tunnels == 'all' || inputs.tunnels == 'bore-tunnel'
+        shell: bash
+        run: |
+          echo "=== Installing Bore ==="
+          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
+            curl -fsSL -o "$TEMP/bore.zip" "https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-pc-windows-msvc.zip"
+            unzip -o "$TEMP/bore.zip" -d "$TEMP"
+            BORE="$TEMP/bore.exe"
+          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
+            brew install bore-cli
+            BORE="bore"
+          else
+            curl -fsSL https://github.com/ekzhang/bore/releases/latest/download/bore-v0.5.0-x86_64-unknown-linux-musl.tar.gz | tar xz
+            BORE="./bore"
+          fi
+          
+          case "${{ inputs.remote_method }}" in
+            ssh) BORE_PORT=22 ;;
+            rdp|xrdp|vnc) BORE_PORT=3389 ;;
+            rustdesk) BORE_PORT=21115 ;;
+            *) BORE_PORT=3389 ;;
+          esac
+          
+          $BORE local $BORE_PORT --to bore.pub > bore.log 2>&1 &
+          sleep 5
+          URL=$(grep -o 'bore.pub:[0-9]*' bore.log | head -1)
+          echo "BORE_URL=$URL" >> $GITHUB_ENV
+          echo "✅ Bore: $URL"
+
+      - name: 🔗 TUNNEL 6: Telebit (P2P)
+        if: inputs.tunnels == 'all' || inputs.tunnels == 'telebit'
+        shell: bash
+        run: |
+          echo "=== Installing Telebit ==="
+          if [[ "${{ inputs.os_image }}" != "windows-latest" ]]; then
+            curl https://get.telebit.io | bash
+            export PATH="$HOME/.telebit/bin:$PATH"
+            telebit relay > telebit.log 2>&1 &
+            sleep 10
+            URL=$(grep -o 'https://[a-z0-9]*\.telebit\.io' telebit.log | head -1)
+            echo "TELEBIT_URL=$URL" >> $GITHUB_ENV
+            echo "✅ Telebit: $URL"
+          else
+            echo "⚠️ Telebit not available on Windows"
+          fi
+
+      - name: 🔗 TUNNEL 7: PageKite
+        if: inputs.tunnels == 'all' || inputs.tunnels == 'pagekite'
+        shell: bash
+        run: |
+          echo "=== Installing PageKite ==="
+          if [[ "${{ inputs.os_image }}" != "windows-latest" ]]; then
+            if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
+              brew install pagekite
+            else
+              sudo apt-get install -y pagekite || pip3 install pagekite
+            fi
+            # PageKite requires signup, show command
+            echo "PAGEKITE_CMD='pagekite.py 3389 yourname.pagekite.me'" >> $GITHUB_ENV
+            echo "⚠️ PageKite requires manual signup at pagekite.net"
+          fi
+
+      - name: 🔗 TUNNEL 8: LocalTunnel (Node.js)
+        if: inputs.tunnels == 'all' || inputs.tunnels == 'localtunnel'
+        shell: bash
+        run: |
+          echo "=== Installing LocalTunnel ==="
+          if [[ "${{ inputs.os_image }}" != "windows-latest" ]]; then
+            npm install -g localtunnel || sudo npm install -g localtunnel
+            case "${{ inputs.remote_method }}" in
+              ssh) LT_PORT=22 ;;
+              rdp|xrdp|vnc) LT_PORT=3389 ;;
+              rustdesk) LT_PORT=21115 ;;
+              *) LT_PORT=3389 ;;
+            esac
+            lt --port $LT_PORT > localtunnel.log 2>&1 &
+            sleep 8
+            URL=$(grep -o 'https://[a-z0-9-]*\.loca\.lt' localtunnel.log | head -1)
+            echo "LOCALTUNNEL_URL=$URL" >> $GITHUB_ENV
+            echo "✅ LocalTunnel: $URL"
+          fi
+
+      - name: 🔗 TUNNEL 9: Expose (PHP)
+        if: inputs.tunnels == 'all' || inputs.tunnels == 'expose'
+        shell: bash
+        run: |
+          echo "=== Installing Expose ==="
+          if [[ "${{ inputs.os_image }}" != "windows-latest" ]]; then
+            if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
+              composer global require beyondcode/expose || true
+            else
+              composer global require beyondcode/expose || true
+            fi
+            echo "⚠️ Expose requires BeyondCode account"
+          fi
+
+      # ═══════════════════════════════════════════════════════════════
+      # SECTION 2: ALL REMOTE METHODS
+      # ═══════════════════════════════════════════════════════════════
+
+      - name: 🖥️ REMOTE 1: Windows RDP
+        if: inputs.os_image == 'windows-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'rdp')
+        shell: pwsh
+        run: |
+          $u=$env:USER_WIN; $p=$env:PASS_WIN
+          $sec = ConvertTo-SecureString $p -AsPlainText -Force
+          if (-not (Get-LocalUser -Name $u -EA SilentlyContinue)) {
+            New-LocalUser -Name $u -Password $sec -AccountNeverExpires
+            Add-LocalGroupMember -Group "Administrators" -Member $u
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u
+          }
+          Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Write-Host "✅ RDP: user=$u / pass=$p"
+
+      - name: 🐧 REMOTE 2: Linux XRDP + XFCE
+        if: inputs.os_image == 'ubuntu-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'xrdp')
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xfce4 xfce4-goodies xrdp ssh
+          echo "xfce4-session" > ~/.xsession
+          sudo systemctl enable xrdp
+          sudo systemctl start xrdp
+          sudo usermod -aG ssl-cert $USER
+          echo "runner:$PASS_NIX" | sudo chpasswd
+          echo "✅ XRDP: user=runner / pass=$PASS_NIX"
+
+      - name: 🍎 REMOTE 3: macOS VNC + SSH
+        if: inputs.os_image == 'macos-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'vnc')
+        run: |
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on -restart -agent -privs -all
+          sudo systemsetup -setremotelogin on
+          echo "runner:$PASS_NIX" | sudo chpasswd
+          echo "✅ VNC + SSH: user=runner / pass=$PASS_NIX"
+
+      - name: 🔐 REMOTE 4: SSH (Linux/macOS)
+        if: inputs.os_image != 'windows-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'ssh')
+        run: |
+          if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
+            sudo systemsetup -setremotelogin on
+          else
+            sudo apt-get install -y openssh-server
+            sudo systemctl enable ssh
+            sudo systemctl start ssh
+          fi
+          echo "runner:$PASS_NIX" | sudo chpasswd
+          # Enable password auth
+          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null || true
+          sudo systemctl restart ssh 2>/dev/null || true
+          echo "✅ SSH: user=runner / pass=$PASS_NIX"
+
+      - name: 🦀 REMOTE 5: RustDesk
+        if: inputs.remote_method == 'all' || inputs.remote_method == 'rustdesk'
+        shell: bash
+        run: |
+          echo "=== Installing RustDesk ==="
+          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
+            curl -fsSL -o "$TEMP/rustdesk.msi" "https://github.com/rustdesk/rustdesk/releases/latest/download/rustdesk-1.3.1-x86_64.msi"
+            msiexec /i "$TEMP/rustdesk.msi" /quiet /norestart
+            "C:\Program Files\RustDesk\rustdesk.exe" &
+            netsh advfirewall firewall add rule name="RD-RustDesk" dir=in action=allow protocol=TCP localport=21115-21119
+            netsh advfirewall firewall add rule name="RD-RustDesk-UDP" dir=in action=allow protocol=UDP localport=21116
+          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
+            brew install --cask rustdesk
+            open /Applications/RustDesk.app
+          else
+            wget https://github.com/rustdesk/rustdesk/releases/latest/download/rustdesk-1.3.1-x86_64.deb
+            sudo dpkg -i rustdesk-1.3.1-x86_64.deb || sudo apt-get install -f -y
+            rustdesk &
+            sudo ufw allow 21115:21119/tcp 2>/dev/null || true
+            sudo ufw allow 21116/udp 2>/dev/null || true
+          fi
+          echo "✅ RustDesk installed and running"
+
+      - name: 📺 REMOTE 6: TeamViewer
+        if: (inputs.remote_method == 'all' || inputs.remote_method == 'teamviewer') && inputs.teamviewer_id != ''
+        shell: bash
+        run: |
+          echo "=== TeamViewer ==="
+          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
+            curl -fsSL -o "$TEMP/teamviewer.exe" "https://download.teamviewer.com/download/TeamViewer_Setup.exe"
+            "$TEMP/teamviewer.exe" /S
+          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
+            brew install --cask teamviewer
+          else
+            wget https://download.teamviewer.com/download/linux/teamviewer_amd64.deb
+            sudo dpkg -i teamviewer_amd64.deb || sudo apt-get install -f -y
+          fi
+          echo "✅ TeamViewer: ID=${{ inputs.teamviewer_id }}"
+
+      - name: 📺 REMOTE 7: AnyDesk
+        if: (inputs.remote_method == 'all' || inputs.remote_method == 'anydesk') && inputs.anydesk_id != ''
+        shell: bash
+        run: |
+          echo "=== AnyDesk ==="
+          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
+            curl -fsSL -o "$TEMP/anydesk.exe" "https://download.anydesk.com/AnyDesk.exe"
+            "$TEMP/anydesk.exe" --install "$TEMP\AnyDesk" --start-with-win --create-shortcuts --silent
+          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
+            brew install --cask anydesk
+          else
+            wget -qO - https://keys.anydesk.com/repos/DEB-GPG-KEY | sudo apt-key add -
+            echo "deb http://deb.anydesk.com/ all main" | sudo tee /etc/apt/sources.list.d/anydesk-stable.list
+            sudo apt-get update
+            sudo apt-get install -y anydesk
+          fi
+          echo "✅ AnyDesk: ID=${{ inputs.anydesk_id }}"
+
+      - name: 📺 REMOTE 8: Chrome Remote Desktop
+        if: (inputs.remote_method == 'all' || inputs.remote_method == 'chrome-remote-desktop') && inputs.crd_code != ''
+        shell: bash
+        run: |
+          echo "=== Chrome Remote Desktop ==="
+          if [[ "${{ inputs.os_image }}" == "windows-latest" ]]; then
+            curl -fsSL -o "$TEMP/crd.msi" "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi"
+            msiexec /i "$TEMP/crd.msi" /quiet /norestart
+            "C:\Program Files (x86)\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe" \
+              --code="${{ inputs.crd_code }}" --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
+              --name="$COMPUTERNAME" --pin="${{ inputs.crd_pin }}"
+          elif [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
+            brew install --cask chrome-remote-desktop
+            /Applications/Chrome\ Remote\ Desktop\ Host.app/Contents/MacOS/remoting_start_host \
+              --code="${{ inputs.crd_code }}" --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
+              --name="$HOSTNAME" --pin="${{ inputs.crd_pin }}"
+          else
+            wget https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
+            sudo dpkg -i chrome-remote-desktop_current_amd64.deb || sudo apt-get install -f -y
+            DISPLAY= /opt/google/chrome-remote-desktop/start-host \
+              --code="${{ inputs.crd_code }}" --redirect-url="https://rem
