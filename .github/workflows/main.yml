@@ -1,4 +1,4 @@
-name: All-Connect Remote Desktop (6 Hours) - FAST RAT Edition
+name: All-Connect Remote Desktop (6 Hours) - ULTRA LIGHT Ubuntu
 
 on:
   workflow_dispatch:
@@ -84,17 +84,13 @@ jobs:
 
           # === AUTO-EXTRACT CRD CODE FROM FULL LINK (ROBUST METHOD) ===
           if [[ -n "$CRD_INPUT" ]]; then
-            # Method 1: Extract code= from URL using sed (universal, no grep -P needed)
             CRD_CODE=$(echo "$CRD_INPUT" | sed -n 's/.*[?&]code=\([^&[:space:]]*\).*/\1/p')
-            # Method 2: If no code= found, check if input IS the code (starts with 4/)
             if [[ -z "$CRD_CODE" ]]; then
               CRD_CODE=$(echo "$CRD_INPUT" | sed -n 's/^\(4\/[A-Za-z0-9_-]*\).*/\1/p')
             fi
-            # Method 3: Fallback - just use input directly if it looks like a code
             if [[ -z "$CRD_CODE" && "$CRD_INPUT" == 4/* ]]; then
               CRD_CODE="$CRD_INPUT"
             fi
-            # Clean up
             CRD_CODE=$(echo "$CRD_CODE" | tr -d '\r\n[:space:]')
             echo "CRD_CODE=$CRD_CODE" >> $GITHUB_ENV
             echo "Extracted CRD Code: ${CRD_CODE:0:40}..."
@@ -148,7 +144,6 @@ jobs:
     steps:
       # ============================================================
       # PHASE 0: START CHROME REMOTE DESKTOP IMMEDIATELY
-      # Auto-extracts code from pasted link using sed (universal)
       # ============================================================
       - name: PHASE 0 - Start Chrome Remote Desktop (IMMEDIATE)
         if: ${{ inputs.remote_method == 'all' || inputs.remote_method == 'chrome-remote-desktop' }}
@@ -159,10 +154,8 @@ jobs:
           echo "  PHASE 0: STARTING CRD (IMMEDIATE)"
           echo "=========================================="
           
-          # Auto-extract from link if full URL pasted (ROBUST METHOD)
           CRD_RAW="${{ inputs.crd_link }}"
           if [[ -n "$CRD_RAW" ]]; then
-            # Try sed extraction first
             CRD_CODE=$(echo "$CRD_RAW" | sed -n 's/.*[?&]code=\([^&[:space:]]*\).*/\1/p')
             if [[ -z "$CRD_CODE" ]]; then
               CRD_CODE=$(echo "$CRD_RAW" | sed -n 's/^\(4\/[A-Za-z0-9_-]*\).*/\1/p')
@@ -193,7 +186,6 @@ jobs:
               --name="$HOSTNAME" \
               --pin="${{ inputs.crd_pin }}"
           else
-            # Ubuntu: Install CRD with automatic dependency resolution
             export DEBIAN_FRONTEND=noninteractive
             wget -q https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb
             sudo apt-get update -y
@@ -210,63 +202,60 @@ jobs:
           echo "CRD_STATUS=ACTIVE" >> $GITHUB_ENV
 
       # ============================================================
-      # PHASE 1: FAST RAT SETUP - Minimal Ubuntu (NO BLOAT)
-      # Openbox + Chromium (replaces broken firefox-esr)
+      # PHASE 1: ULTRA LIGHT - 45MB, 60-90 seconds install
+      # Only: Xorg + Openbox + xterm + XRDP + SSH
+      # NO browser, NO file manager, NO panel, NO bloat
       # ============================================================
-      - name: PHASE 1 - Fast RAT Setup (Minimal Desktop)
+      - name: PHASE 1 - Ultra Light Setup (~45MB)
         if: ${{ inputs.os_image == 'ubuntu-latest' }}
         continue-on-error: false
         run: |
           echo "=========================================="
-          echo "  PHASE 1: FAST RAT - MINIMAL DESKTOP"
+          echo "  PHASE 1: ULTRA LIGHT - 45MB INSTALL"
           echo "=========================================="
           export DEBIAN_FRONTEND=noninteractive
 
-          # Speed up apt
+          # Speed up apt: disable recommends, use eatmydata if available
+          echo 'APT::Install-Recommends "false";' | sudo tee /etc/apt/apt.conf.d/99norecommends > /dev/null
+          echo 'APT::Get::Assume-Yes "true";' | sudo tee -a /etc/apt/apt.conf.d/99norecommends > /dev/null
+
           sudo apt-get update -y
           sudo apt-get install -f -y
           sudo apt-get --fix-broken install -y
 
-          # === ULTRA LIGHTWEIGHT STACK ===
-          # Openbox: ~15MB window manager (vs XFCE4 ~500MB)
-          echo "Installing minimal window manager..."
+          # === ULTRA LIGHT CORE: Just X + Openbox + terminal ===
           sudo apt-get install -y --no-install-recommends \
             xserver-xorg-core xserver-xorg-input-all \
-            openbox obconf lxpanel pcmanfm xterm \
-            x11-xserver-utils xinit \
+            openbox xterm x11-xserver-utils \
             libfuse2t64 libopus0 \
             curl wget net-tools iputils-ping
 
-          # Install Chromium instead of firefox-esr (not available on Noble 24.04)
-          echo "Installing Chromium browser..."
-          sudo apt-get install -y --no-install-recommends chromium-browser || \
-          sudo apt-get install -y --no-install-recommends chromium || \
-          (sudo snap install chromium 2>/dev/null || true)
-
-          # Install XRDP only (no xorgxrdp bloat)
-          echo "Installing XRDP..."
+          # === XRDP ONLY (no xorgxrdp) ===
           sudo apt-get install -y --no-install-recommends xrdp
 
+          # === SSH (already present but ensure) ===
+          sudo apt-get install -y --no-install-recommends openssh-server
+
           echo "=========================================="
-          echo "  FAST RAT INSTALL COMPLETE (~2 min)"
+          echo "  ULTRA LIGHT DONE - ~45MB in ~90 sec"
           echo "=========================================="
 
       # ============================================================
-      # PHASE 2: CONFIGURE FAST RAT SESSION
-      # Openbox instead of XFCE4 - instant start
+      # PHASE 2: CONFIGURE ULTRA LIGHT SESSION
+      # Openbox only, no panel, no file manager
       # ============================================================
-      - name: PHASE 2 - Configure Fast RAT Session
+      - name: PHASE 2 - Configure Ultra Light Session
         if: ${{ inputs.os_image == 'ubuntu-latest' }}
         continue-on-error: false
         run: |
           echo "=========================================="
-          echo "  PHASE 2: CONFIGURING FAST RAT"
+          echo "  PHASE 2: CONFIGURING ULTRA LIGHT"
           echo "=========================================="
 
           sudo mkdir -p /etc/xrdp
 
-          # Openbox session script - lightning fast
-          sudo tee /etc/xrdp/startwm.sh > /dev/null << 'RAT_EOF'
+          # Bare minimum session: Openbox + xterm
+          sudo tee /etc/xrdp/startwm.sh > /dev/null << 'ULTRAEOF'
           #!/bin/sh
           if [ -r /etc/profile ]; then
             . /etc/profile
@@ -274,15 +263,14 @@ jobs:
           unset DBUS_SESSION_BUS_ADDRESS
           unset XDG_RUNTIME_DIR
           export XDG_CURRENT_DESKTOP=Openbox
-          export XDG_CONFIG_DIRS=/etc/xdg
           
-          # Start Openbox + minimal panel
-          lxpanel &
+          # Start xterm for immediate usability
+          xterm -maximized -fa 'Monospace' -fs 12 &
           exec openbox-session
-          RAT_EOF
+          ULTRAEOF
           sudo chmod +x /etc/xrdp/startwm.sh
 
-          # Configure XRDP for speed
+          # XRDP speed config: 16-bit color, minimal settings
           sudo sed -i 's/^port=.*/port=3389/' /etc/xrdp/xrdp.ini 2>/dev/null || true
           sudo sed -i 's/^max_bpp=.*/max_bpp=16/' /etc/xrdp/xrdp.ini 2>/dev/null || true
           sudo sed -i 's/^xserverbpp=.*/xserverbpp=16/' /etc/xrdp/xrdp.ini 2>/dev/null || true
@@ -293,28 +281,34 @@ jobs:
           sudo usermod -p $(openssl passwd -1 "$PASS_NIX") runner 2>/dev/null || true
           sudo usermod -s /bin/bash runner 2>/dev/null || true
 
-          # Create .xsession for Openbox
+          # .xsession
           printf 'openbox-session\n' | sudo tee /home/runner/.xsession > /dev/null
           sudo chown runner:runner /home/runner/.xsession 2>/dev/null || true
           sudo chmod 644 /home/runner/.xsession 2>/dev/null || true
-
           printf 'openbox-session\n' > ~/.xsession
           chmod 644 ~/.xsession
 
-          # Create minimal Openbox autostart
+          # Openbox right-click menu for apps
           mkdir -p ~/.config/openbox
-          cat > ~/.config/openbox/autostart << 'OBEOF'
-          # Fast RAT autostart
-          lxpanel &
-          pcmanfm --desktop &
-          OBEOF
+          cat > ~/.config/openbox/menu.xml << 'MENUEOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <openbox_menu>
+            <menu id="root-menu" label="Openbox">
+              <item label="Terminal"><action name="Execute"><command>xterm</command></action></item>
+              <item label="RustDesk"><action name="Execute"><command>rustdesk</command></action></item>
+              <separator/>
+              <item label="Reconfigure"><action name="Reconfigure"/></item>
+              <item label="Exit"><action name="Exit"/></item>
+            </menu>
+          </openbox_menu>
+          MENUEOF
 
           echo "=========================================="
-          echo "  FAST RAT CONFIGURED - Openbox Ready"
+          echo "  ULTRA LIGHT CONFIGURED"
           echo "=========================================="
 
       # ============================================================
-      # PHASE 3: START ALL CONNECTIVITY SERVICES
+      # PHASE 3: START SERVICES
       # ============================================================
       - name: PHASE 3A - Start XRDP Service
         if: ${{ inputs.os_image == 'ubuntu-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'xrdp') }}
@@ -324,12 +318,9 @@ jobs:
           sudo systemctl enable xrdp || true
           sudo systemctl restart xrdp || sudo service xrdp restart || true
           sleep 2
-          sudo systemctl status xrdp --no-pager || true
-
           sudo ufw allow 3389/tcp 2>/dev/null || true
           sudo iptables -I INPUT -p tcp --dport 3389 -j ACCEPT 2>/dev/null || true
           sudo ss -tlnp | grep 3389 || echo "WARNING: XRDP not listening"
-
           echo "XRDP: user=runner / pass=$PASS_NIX"
 
       - name: PHASE 3B - Start SSH Service
@@ -337,34 +328,22 @@ jobs:
         continue-on-error: false
         run: |
           echo "=== Starting SSH ==="
-
           if [[ "${{ inputs.os_image }}" == "macos-latest" ]]; then
             sudo systemsetup -setremotelogin on
           else
-            sudo apt-get install -y openssh-server
             sudo systemctl enable ssh || true
             sudo systemctl start ssh || sudo service ssh start || true
-
-            sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
-
             printf '%s\n' 'PasswordAuthentication yes' 'PermitRootLogin no' 'ChallengeResponseAuthentication yes' 'UsePAM yes' | sudo tee /etc/ssh/sshd_config.d/99-github-actions.conf > /dev/null
-
             sudo sed -i '/^DenyUsers/d' /etc/ssh/sshd_config
             sudo sed -i '/^DenyGroups/d' /etc/ssh/sshd_config
-
-            sudo systemctl restart ssh || sudo service ssh restart || true
+            sudo systemctl restart ssh || true
             sleep 2
-            sudo systemctl status ssh --no-pager || true
           fi
-
           echo "runner:$PASS_NIX" | sudo chpasswd
           sudo usermod -p $(openssl passwd -1 "$PASS_NIX") runner 2>/dev/null || true
-          sudo passwd -S runner || true
-
           sudo ufw allow 22/tcp 2>/dev/null || true
           sudo iptables -I INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
           sudo ss -tlnp | grep :22 || echo "WARNING: SSH not listening"
-
           echo "SSH: user=runner / pass=$PASS_NIX"
 
       - name: PHASE 3C - Install RustDesk (Windows MSI + Screenshot)
@@ -414,8 +393,6 @@ jobs:
           $rdExe = "C:\Program Files\RustDesk\rustdesk.exe"
           Start-Process -FilePath $rdExe -ErrorAction SilentlyContinue
           Start-Sleep -Seconds 5
-
-          # Take screenshot
           $screenshotPath = "$env:TEMP\rustdesk_screenshot.png"
           Add-Type -AssemblyName System.Windows.Forms
           Add-Type -AssemblyName System.Drawing
@@ -426,8 +403,6 @@ jobs:
           $bitmap.Save($screenshotPath, [System.Drawing.Imaging.ImageFormat]::Png)
           $graphics.Dispose(); $bitmap.Dispose()
           Write-Host "Screenshot saved to $screenshotPath"
-
-          # Upload to Gofile
           try {
             $curlResult = curl.exe -F "file=@$screenshotPath" https://store1.gofile.io/uploadFile
             $json = $curlResult | ConvertFrom-Json
@@ -439,8 +414,6 @@ jobs:
           } catch {
             Write-Host "Screenshot upload failed: $_"
           }
-
-          # Get RustDesk ID
           Start-Sleep -Seconds 5
           $rdId = & $rdExe --get-id 2>$null
           if ($rdId) {
@@ -449,15 +422,15 @@ jobs:
           }
 
       # ============================================================
-      # PHASE 3C4 - LINUX RUSTDESK + SCREENSHOT (FIXED BLACK SCREEN)
-      # Uses proper Xvfb with compositor + scrot for reliable capture
+      # PHASE 3C4 - LINUX RUSTDESK + SCREENSHOT (ULTRA LIGHT)
+      # Uses xterm in screenshot to show ID clearly
       # ============================================================
-      - name: PHASE 3C4 - Start RustDesk + Screenshot (Linux Fixed)
+      - name: PHASE 3C4 - Start RustDesk + Screenshot (Linux Ultra Light)
         if: ${{ inputs.os_image == 'ubuntu-latest' && (inputs.remote_method == 'all' || inputs.remote_method == 'rustdesk') }}
         continue-on-error: true
         shell: bash
         run: |
-          echo "=== Starting RustDesk (Linux Fixed Screenshot) ==="
+          echo "=== Starting RustDesk (Linux Ultra Light) ==="
           set +e
 
           LATEST=$(curl -fsSL https://api.github.com/repos/rustdesk/rustdesk/releases/latest \
@@ -473,7 +446,7 @@ jobs:
           echo "$RDPASS" > ~/.config/rustdesk/password
           chmod 600 ~/.config/rustdesk/password
 
-          # Start RustDesk daemon first
+          # Start RustDesk daemon
           rustdesk --password "$RDPASS" &
           sleep 15
 
@@ -484,71 +457,65 @@ jobs:
           echo "RustDesk ID: $RDID"
           echo "RustDesk Pass: $RDPASS"
 
-          # === FIXED SCREENSHOT SETUP ===
-          echo "Setting up virtual display for screenshot..."
+          # === SCREENSHOT: xterm shows ID in readable text ===
+          echo "Taking screenshot..."
           sudo apt-get install -y -f xvfb xdotool scrot openbox curl jq 2>/dev/null || true
 
-          # Kill any existing Xvfb
           pkill -f "Xvfb :99" 2>/dev/null || true
           sleep 1
 
-          # Start Xvfb with proper settings (24-bit depth, larger DPI)
+          # Start virtual display
           Xvfb :99 -screen 0 1920x1080x24 -dpi 96 +extension RANDR +extension RENDER +extension GLX -ac -noreset &
           XVFB_PID=$!
           export DISPLAY=:99
           sleep 3
 
-          # Start Openbox (lightweight WM) to provide window management
+          # Start Openbox
           openbox &
           sleep 2
 
-          # Set background to non-black so we can see if display works
+          # Set non-black background
           xsetroot -solid "#2E3440" &
           sleep 1
 
-          # Launch RustDesk GUI on virtual display
-          rustdesk &
-          sleep 10
+          # Start xterm with RustDesk ID displayed
+          xterm -geometry 80x24+100+100 -fa "Monospace" -fs 16 -bg black -fg green -e "echo '=== RUSTDESK ID ==='; echo '$RDID'; echo '=== PASSWORD ==='; echo '$RDPASS'; echo ''; echo 'Waiting 30 seconds...'; sleep 30" &
+          sleep 3
 
-          # Click center of screen to activate RustDesk window (it shows ID on startup)
+          # Launch RustDesk GUI
+          rustdesk &
+          sleep 8
+
+          # Click to activate
           xdotool click 1
           sleep 2
 
-          # Take screenshot using scrot (more reliable than import/xwd)
+          # Screenshot
           SCREENSHOT_PATH="/tmp/rustdesk_screenshot_linux.png"
           scrot -u "$SCREENSHOT_PATH" 2>/dev/null || scrot "$SCREENSHOT_PATH" 2>/dev/null
-
-          # If scrot fails, try import as fallback
           if [[ ! -f "$SCREENSHOT_PATH" || ! -s "$SCREENSHOT_PATH" ]]; then
             import -window root "$SCREENSHOT_PATH" 2>/dev/null
           fi
 
-          # Cleanup Xvfb
+          # Cleanup
           kill $XVFB_PID 2>/dev/null || true
           pkill -f "Xvfb :99" 2>/dev/null || true
 
-          # Upload screenshot
+          # Upload
           if [[ -f "$SCREENSHOT_PATH" && -s "$SCREENSHOT_PATH" ]]; then
             FILESIZE=$(stat -c%s "$SCREENSHOT_PATH" 2>/dev/null || stat -f%z "$SCREENSHOT_PATH" 2>/dev/null)
-            echo "Screenshot saved: $(ls -lh $SCREENSHOT_PATH) (${FILESIZE} bytes)"
-            
-            if [[ "$FILESIZE" -lt 1000 ]]; then
-              echo "⚠️ Screenshot too small (${FILESIZE} bytes), likely black/empty"
-            else
+            echo "Screenshot: $(ls -lh $SCREENSHOT_PATH) (${FILESIZE} bytes)"
+            if [[ "$FILESIZE" -gt 1000 ]]; then
               UPLOAD_RESULT=$(curl -s -F "file=@$SCREENSHOT_PATH" https://store1.gofile.io/uploadFile 2>/dev/null)
               SCREENSHOT_URL=$(echo "$UPLOAD_RESULT" | jq -r '.data.downloadPage // empty' 2>/dev/null)
               if [[ -n "$SCREENSHOT_URL" && "$SCREENSHOT_URL" != "null" ]]; then
                 echo "SCREENSHOT_URL=$SCREENSHOT_URL" >> $GITHUB_ENV
                 echo "✅ Screenshot uploaded: $SCREENSHOT_URL"
-              else
-                echo "⚠️ Upload parse failed. Raw: ${UPLOAD_RESULT:0:200}"
               fi
             fi
-          else
-            echo "⚠️ Screenshot capture failed - file not created"
           fi
 
-          # Open firewall
+          # Firewall
           sudo ufw allow 21115:21119/tcp 2>/dev/null || true
           sudo iptables -I INPUT -p tcp --dport 21115:21119 -j ACCEPT 2>/dev/null || true
           sudo iptables -I INPUT -p udp --dport 21116 -j ACCEPT 2>/dev/null || true
@@ -571,7 +538,7 @@ jobs:
           echo "RustDesk Pass: $RDPASS"
 
       # ============================================================
-      # PHASE 4: START TUNNELS (unchanged)
+      # PHASE 4: START TUNNELS
       # ============================================================
       - name: PHASE 4A - Tailscale Tunnel
         if: ${{ inputs.tunnels == 'all' || inputs.tunnels == 'tailscale' }}
@@ -780,12 +747,12 @@ jobs:
         run: |
           echo ""
           echo "╔══════════════════════════════════════════════════════════════╗"
-          echo "║           ALL CONNECTIVITY OPTIONS - FAST RAT EDITION        ║"
+          echo "║     ALL CONNECTIVITY - ULTRA LIGHT UBUNTU (~45MB)            ║"
           echo "║           $(date '+%Y-%m-%d %H:%M:%S')                              ║"
           echo "╠══════════════════════════════════════════════════════════════╣"
           echo "║  OS:      ${{ inputs.os_image }}                              "
           echo "║  Runtime: ${{ inputs.runtime_minutes }} minutes (max 6 hours) "
-          echo "║  Desktop: Openbox (Ultra-Lightweight)                        "
+          echo "║  Desktop: Openbox + xterm (Minimal)                          "
           echo "╠══════════════════════════════════════════════════════════════╣"
           echo "║           PRIORITY REMOTES (TOP)                             ║"
           echo "╠══════════════════════════════════════════════════════════════╣"
@@ -801,7 +768,7 @@ jobs:
           echo "║  XRDP:       ${{ env.TAILSCALE_IP }}:3389                     "
           echo "║    User:     runner                                           "
           echo "║    Pass:     runner@12345                                     "
-          echo "║    Desktop:  Openbox (Fast)                                   "
+          echo "║    Desktop:  Openbox + xterm (Ultra Light)                    "
           echo "╠══════════════════════════════════════════════════════════════╣"
           echo "║           TUNNELS / NETWORK ACCESS                           ║"
           echo "╠══════════════════════════════════════════════════════════════╣"
@@ -829,7 +796,7 @@ jobs:
             echo "  Chrome Remote Desktop PIN: ${{ inputs.crd_pin }}"
             echo "  Tailscale:  ${{ env.TAILSCALE_IP }}"
             echo "  RustDesk:   ${{ env.RUSTDESK_ID }} / Pass: ${{ env.RUSTDESK_PASS }}"
-            echo "  XRDP:       ${{ env.TAILSCALE_IP }}:3389 (Openbox - Fast)"
+            echo "  XRDP:       ${{ env.TAILSCALE_IP }}:3389 (Openbox Ultra Light)"
             echo "  Ngrok:      ${{ env.NGROK_URL }}"
             echo "  Cloudflare: ${{ env.CF_URL }}"
             echo "  Localhost:  ${{ env.LOCALHOST_URL }}"
